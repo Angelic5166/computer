@@ -39,7 +39,7 @@ docker run --rm -d \
   --cidfile "${cid_file}" \
   --platform linux/amd64 \
   -e PORT="${port}" \
-  -e DISABLE_FUSE=1 \
+  -e FUSE_MOUNT=none \
   -e EXEC_LOG_MAX_BYTES=256 \
   -p "${port}:${port}" \
   -v "${binary}:/usr/local/bin/wsd:ro" \

@@ -1,7 +1,7 @@
 // Userspace bidirectional sync between the @platformatic/vfs store
 // and a real directory on the host filesystem. Used when FUSE is
 // unavailable (no /dev/fuse, no macFUSE) and the user has opted in
-// via FUSE_SHIM=1. Explicitly not production-grade: races between
+// via FUSE_MOUNT=shim. Explicitly not production-grade: races between
 // writers across the seam are resolved on the next reconcile tick,
 // with VFS winning ties.
 //

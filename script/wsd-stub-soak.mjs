@@ -194,7 +194,7 @@ async function main() {
     ...process.env,
     MOUNT_POINT: mountPoint,
     PORT: String(port),
-    DISABLE_FUSE: "1",
+    FUSE_MOUNT: "none",
     CAPNWEB_TRACK_STUBS: "1",
   };
 

@@ -15,10 +15,11 @@ import { WebSocket, WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
 import {
   createNodeVirtualFileSystem,
-  detectFUSEBackend,
   type FUSEBackend,
   type FuseMount,
   mountFuse,
+  parseFuseMountMode,
+  resolveFuseBackend,
 } from "../fuse/index.js";
 import { mountShim, type ShimMount } from "../shim/index.js";
 import { installLogging } from "./logger.js";
@@ -33,6 +34,29 @@ const BUILD_DEFAULT_PORT: number | undefined =
 const DEFAULT_PORT = BUILD_DEFAULT_PORT ?? 45678;
 const DEFAULT_MOUNT_POINT = "/workspace";
 const HOST = "0.0.0.0";
+
+// The previous boot path used three separate env vars to pick a
+// FUSE backend (DISABLE_FUSE, FUSE_SHIM, WSD_FUSE_BACKEND). They
+// were collapsed into a single FUSE_MOUNT knob. We're pre-1.0 alpha
+// with no production consumers, so refuse to boot on the old vars
+// rather than silently translating — the operator should learn the
+// new name once.
+const LEGACY_FUSE_ENV_MIGRATION: Record<string, string> = {
+  DISABLE_FUSE: "FUSE_MOUNT=none",
+  FUSE_SHIM: "FUSE_MOUNT=shim",
+  WSD_FUSE_BACKEND: "FUSE_MOUNT=fuse (linux) or FUSE_MOUNT=macfuse (darwin)",
+};
+
+function rejectLegacyFuseEnv(env: NodeJS.ProcessEnv): void {
+  for (const [name, replacement] of Object.entries(LEGACY_FUSE_ENV_MIGRATION)) {
+    const value = env[name];
+    if (value !== undefined && value !== "") {
+      throw new Error(
+        `${name} is no longer supported; use ${replacement} instead (FUSE_MOUNT defaults to auto)`,
+      );
+    }
+  }
+}
 
 function parsePort(value: string | undefined): number {
   if (value === undefined || value === "") {
@@ -359,37 +383,22 @@ function toHttpUrl(input: string): string {
 
 async function main(): Promise<void> {
   // Install logging + crash handlers first thing so any early throws
-  // (parsePort, parseMountPoint, detectFUSEBackend) still land in
+  // (parsePort, parseMountPoint, resolveFuseBackend) still land in
   // LOG_FILE when set.
   const teardownLogging = installLogging(process.env.LOG_FILE);
 
+  rejectLegacyFuseEnv(process.env);
+
   const port = parsePort(process.env.PORT);
   const mountPoint = parseMountPoint(process.env.MOUNT_POINT);
-  // DISABLE_FUSE=1 skips the FUSE mount entirely. The HTTP server +
-  // /api and /ws endpoints stay up so tests and tooling can talk to
-  // wsd's RPC surface without needing /dev/fuse. The in-memory store
-  // is still real; nothing is mounted on the filesystem.
-  //
-  // FUSE_SHIM=1 swaps the kernel-FUSE mount for a userspace polling
-  // shim that materialises the VFS at MOUNT_POINT on the host fs and
-  // keeps the two in sync. Dev-only: it loses races between writers
-  // and resolves them on the next reconcile tick (~250 ms).
-  const fuseDisabled = process.env.DISABLE_FUSE === "1";
-  const shimRequested = process.env.FUSE_SHIM === "1";
-  if (fuseDisabled && shimRequested) {
-    throw new Error("DISABLE_FUSE=1 and FUSE_SHIM=1 are mutually exclusive");
-  }
-  let backend: FUSEBackend;
-  if (fuseDisabled) {
-    backend = { kind: "none", reason: "DISABLE_FUSE=1" };
-  } else if (shimRequested) {
-    backend = { kind: "shim", reason: "FUSE_SHIM=1" };
-  } else {
-    backend = await detectFUSEBackend();
-    if (backend.kind === "none") {
-      throw new Error(`FUSE backend unavailable: ${backend.reason}`);
-    }
-  }
+  // FUSE_MOUNT picks the backend. auto (default) probes /dev/fuse
+  // or macFUSE and falls back to the userspace shim. fuse / macfuse
+  // require their respective real backend. shim forces the userspace
+  // polling shim. none skips the mount entirely; HTTP + /api + /ws
+  // still come up so tests and tooling can talk to wsd's RPC surface.
+  const fuseMountMode = parseFuseMountMode(process.env.FUSE_MOUNT);
+  const backend: FUSEBackend = await resolveFuseBackend(fuseMountMode);
+  console.log(`[info] FUSE_MOUNT=${fuseMountMode} resolved to backend=${backend.kind}`);
 
   const upstreamUrl = process.env.UPSTREAM_URL?.trim();
   let upstreamClient: WorkspaceClient | undefined;
@@ -502,8 +511,9 @@ async function main(): Promise<void> {
 
       const boundPort = typeof address === "object" && address !== null ? address.port : port;
       info.port = boundPort;
+      const mountLabel = backend.kind === "none" ? "(disabled)" : mountPoint;
       console.log(
-        `wsd listening on ${HOST}:${boundPort} mount=${fuseDisabled ? "(disabled)" : mountPoint} backend=${backend.kind}`,
+        `wsd listening on ${HOST}:${boundPort} mount=${mountLabel} backend=${backend.kind}`,
       );
       resolve();
     });

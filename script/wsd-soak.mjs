@@ -46,7 +46,7 @@ const PAYLOAD_B = Number(process.env.SOAK_PAYLOAD_B ?? 64);
 const SAMPLE_MS = Number(process.env.SOAK_SAMPLE_MS ?? 250);
 
 // SOAK_DISABLE_FUSE=1 skips the FUSE device/cap plumbing and
-// passes DISABLE_FUSE=1 into the container. Useful in
+// passes FUSE_MOUNT=none into the container. Useful in
 // environments where /dev/fuse isn't exposed to the host
 // (e.g. running inside a sandbox container, or CI without
 // privileged docker). The sync wire still exercises the full
@@ -120,7 +120,7 @@ async function bootContainer(extraEnv = {}) {
     "MOUNT_POINT=/workspace",
   );
   if (DISABLE_FUSE) {
-    args.push("-e", "DISABLE_FUSE=1");
+    args.push("-e", "FUSE_MOUNT=none");
   }
   for (const [k, v] of Object.entries(extraEnv)) {
     args.push("-e", `${k}=${v}`);

@@ -51,7 +51,7 @@ export interface ServerOptions {
    * Optional hook fired inside the SyncRPC `push` handler, right
    * after a successful peer batch has been committed. Resolved
    * before `push()` returns to the caller. Used by wsd to settle
-   * the FUSE_SHIM layer so a subsequent `shell.exec` sees the
+   * the userspace shim layer so a subsequent `shell.exec` sees the
    * just-pushed files on disk.
    *
    * Errors are caught and logged — the push itself already

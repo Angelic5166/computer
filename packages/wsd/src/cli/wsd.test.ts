@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect, onTestFinished, test } from "vitest";
 
-import { detectFUSEBackend } from "../fuse/index.js";
+import { resolveFuseBackend } from "../fuse/index.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "../..");
@@ -39,7 +39,7 @@ test("wsd rejects non-numeric EXEC_LOG_MAX_BYTES values", async () => {
       MOUNT_POINT: "/tmp/wsd-mount-not-used",
       PORT: String(port),
       EXEC_LOG_MAX_BYTES: "foo",
-      DISABLE_FUSE: "1",
+      FUSE_MOUNT: "none",
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
@@ -61,7 +61,7 @@ test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (_t
   await startWsd({
     port,
     mountPoint,
-    env: { DISABLE_FUSE: "1", LOG_FILE: logFile },
+    env: { FUSE_MOUNT: "none", LOG_FILE: logFile },
   });
   onTestFinished(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -69,16 +69,20 @@ test("wsd appends to LOG_FILE when set, in addition to stdout/stderr", async (_t
   expect(contents).toMatch(/\[info\] wsd listening on/);
 });
 
-test("wsd exposes file IO through the mounted filesystem", async (ctx) => {
-  const backend = await detectFUSEBackend();
-  if (backend.kind === "none") {
-    ctx.skip(backend.reason);
+test("wsd exposes file IO through real FUSE when FUSE_MOUNT=fuse", async (ctx) => {
+  // Only meaningful on linux hosts with /dev/fuse available. Use
+  // the explicit FUSE_MOUNT=fuse value so the test fails loudly if
+  // /dev/fuse goes missing rather than silently sliding onto the
+  // shim under auto-detection.
+  const backend = await resolveFuseBackend("auto");
+  if (backend.kind !== "fuse") {
+    ctx.skip(`requires real FUSE; auto resolved to ${backend.kind}`);
     return;
   }
 
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd({ port, mountPoint });
+  await startWsd({ port, mountPoint, env: { FUSE_MOUNT: "fuse" } });
 
   const health = await request(`http://127.0.0.1:${port}/health`);
   expect(health.statusCode).toBe(200);
@@ -91,7 +95,7 @@ test("wsd exposes file IO through the mounted filesystem", async (ctx) => {
   const info = await request(`http://127.0.0.1:${port}/__wsd/info`);
   expect(info.statusCode).toBe(200);
   expect(JSON.parse(info.body)).toEqual({
-    backend,
+    backend: { kind: "fuse" },
     mountPoint,
     port,
   });
@@ -105,7 +109,7 @@ test("/ws serves a capnweb WorkspaceRPC session", async (_ctx) => {
   const { createWorkspaceClient } = await import("@cloudflare/workspace-rpc/client");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd({ port, mountPoint, env: { DISABLE_FUSE: "1" } });
+  await startWsd({ port, mountPoint, env: { FUSE_MOUNT: "none" } });
 
   const client = createWorkspaceClient({ url: `ws://127.0.0.1:${port}/ws` });
   try {
@@ -130,20 +134,20 @@ test("/api serves a capnweb HTTP-batch WorkspaceRPC session", async (_ctx) => {
   const { newHttpBatchRpcSession } = await import("capnweb");
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd({ port, mountPoint, env: { DISABLE_FUSE: "1" } });
+  await startWsd({ port, mountPoint, env: { FUSE_MOUNT: "none" } });
 
   // HTTP batch flushes on first await; each call is a fresh session.
   const stub = newHttpBatchRpcSession(`http://127.0.0.1:${port}/api`);
   expect(await stub.sync.hasObjects([])).toEqual([]);
 });
 
-test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (_ctx) => {
+test("wsd exposes file IO through the userspace shim when FUSE_MOUNT=shim", async (_ctx) => {
   // No FUSE backend required — the shim runs in user space and is
-  // explicitly opt-in via FUSE_SHIM=1. Mirrors the real-FUSE test
-  // above but for the dev fallback path.
+  // explicitly opt-in via FUSE_MOUNT=shim. Mirrors the real-FUSE
+  // test above but for the dev fallback path.
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-"));
-  await startWsd({ port, mountPoint, env: { FUSE_SHIM: "1" } });
+  await startWsd({ port, mountPoint, env: { FUSE_MOUNT: "shim" } });
 
   const info = await request(`http://127.0.0.1:${port}/__wsd/info`);
   expect(info.statusCode).toBe(200);
@@ -158,7 +162,7 @@ test("wsd exposes file IO through the FUSE_SHIM userspace shim", async (_ctx) =>
   expect(await fs.readFile(path.join(mountPoint, "dir", "hello.txt"), "utf8")).toBe("hello shim");
 });
 
-test("FUSE_SHIM materialises an RPC push under the mount point", async (_ctx) => {
+test("FUSE_MOUNT=shim materialises an RPC push under the mount point", async (_ctx) => {
   // End-to-end version of the cross-namespace fix: a peer pushes a
   // file at `${MOUNT_POINT}/repo/a.txt` into wsd's VFS over
   // capnweb, and the shim drops it on disk at the same absolute
@@ -171,7 +175,7 @@ test("FUSE_SHIM materialises an RPC push under the mount point", async (_ctx) =>
 
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-push-"));
-  await startWsd({ port, mountPoint, env: { FUSE_SHIM: "1" } });
+  await startWsd({ port, mountPoint, env: { FUSE_MOUNT: "shim" } });
 
   const client = createWorkspaceClient({ url: `ws://127.0.0.1:${port}/ws` });
   onTestFinished(() => client.close());
@@ -190,7 +194,7 @@ test("FUSE_SHIM materialises an RPC push under the mount point", async (_ctx) =>
   expect(await fs.readFile(path.join(mountPoint, "repo", "a.txt"), "utf8")).toBe("alpha");
 });
 
-test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
+test("wsd rejects unknown FUSE_MOUNT values", async () => {
   const port = await getAvailablePort();
   const child = spawn(cliPath, {
     cwd: packageRoot,
@@ -198,15 +202,37 @@ test("wsd rejects FUSE_SHIM=1 alongside DISABLE_FUSE=1", async () => {
       ...process.env,
       MOUNT_POINT: "/tmp/wsd-mount-not-used",
       PORT: String(port),
-      FUSE_SHIM: "1",
-      DISABLE_FUSE: "1",
+      FUSE_MOUNT: "bogus",
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
 
   const { code, stderr } = await waitForExit(child);
   expect(code).toBe(1);
-  expect(stderr).toMatch(/mutually exclusive/);
+  expect(stderr).toMatch(/FUSE_MOUNT must be one of/);
+});
+
+test.each([
+  ["DISABLE_FUSE", "1"],
+  ["FUSE_SHIM", "1"],
+  ["WSD_FUSE_BACKEND", "linux"],
+])("wsd refuses to boot when legacy %s is set", async (name, value) => {
+  const port = await getAvailablePort();
+  const child = spawn(cliPath, {
+    cwd: packageRoot,
+    env: {
+      ...process.env,
+      MOUNT_POINT: "/tmp/wsd-mount-not-used",
+      PORT: String(port),
+      [name]: value,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+
+  const { code, stderr } = await waitForExit(child);
+  expect(code).toBe(1);
+  expect(stderr).toMatch(new RegExp(`${name} is no longer supported`));
+  expect(stderr).toMatch(/FUSE_MOUNT/);
 });
 
 test("/connect re-dial tears down the prior WebSocket session", async (_ctx) => {
@@ -262,7 +288,7 @@ test("/connect re-dial tears down the prior WebSocket session", async (_ctx) => 
 
   const port = await getAvailablePort();
   const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-mount-"));
-  await startWsd({ port, mountPoint, env: { DISABLE_FUSE: "1" } });
+  await startWsd({ port, mountPoint, env: { FUSE_MOUNT: "none" } });
 
   const peerUrl = `http://127.0.0.1:${peerPort}`;
   const connect = async () => {

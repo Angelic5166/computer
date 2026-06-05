@@ -23,8 +23,11 @@ RUN apt-get update \
 COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 
 # wsd's defaults: HTTP+WS on :8080, FUSE mount on MOUNT_POINT.
+# FUSE_MOUNT=auto picks real FUSE on Cloudflare Containers (where
+# /dev/fuse is exposed) and the userspace shim under wrangler dev.
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
+ENV FUSE_MOUNT=auto
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/wsd"]

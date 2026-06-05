@@ -20,12 +20,12 @@ COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
 
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
-# FUSE_SHIM=1 lets wsd run without /dev/fuse — required when the
-# container host can't expose the FUSE device (e.g. wrangler dev on
-# any platform that doesn't pass through /dev/fuse, or a sandbox
-# without CAP_SYS_ADMIN). In production on Cloudflare Containers the
-# real FUSE mount works; this flag is for local iteration only.
-ENV FUSE_SHIM=1
+# FUSE_MOUNT=auto probes /dev/fuse at startup and uses the real
+# kernel FUSE backend when available (Cloudflare Containers in
+# production) or transparently falls back to the userspace shim
+# (wrangler dev, sandboxes without CAP_SYS_ADMIN). Same image works
+# in both environments.
+ENV FUSE_MOUNT=auto
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/wsd"]
