@@ -59,13 +59,28 @@ export interface ServerOptions {
    * push failure.
    */
   afterApply?: () => void | Promise<void>;
+  /**
+   * Optional hook fired inside the SyncRPC `fetchChanges` handler,
+   * right before the receiver computes the change set the puller
+   * will see. Resolved before any entries stream. Used by wsd to
+   * settle the userspace shim's disk→VFS reconcile so a
+   * `Workspace.pull()` issued right after `shell.exec` returns the
+   * files the exec'd process wrote, without waiting on the shim's
+   * periodic poll.
+   *
+   * Fires on every fetch, including ones that would otherwise
+   * stream zero entries — the hook is what produces the entries in
+   * the first place. Errors are caught and logged; a hook failure
+   * must not fail the fetch.
+   */
+  beforeFetch?: () => void | Promise<void>;
 }
 
 class SyncRPCServer extends RpcTarget implements SyncRPC {
   constructor(
     private readonly db: Database,
     private readonly options: Required<Pick<ServerOptions, "ignore">> &
-      Pick<ServerOptions, "afterApply">,
+      Pick<ServerOptions, "afterApply" | "beforeFetch">,
   ) {
     super();
     trackStub(this);
@@ -134,6 +149,16 @@ class SyncRPCServer extends RpcTarget implements SyncRPC {
     appliedPushRev: number;
     stream: ReadableStream<ChangeEntry>;
   }> {
+    if (this.options.beforeFetch !== undefined) {
+      try {
+        await this.options.beforeFetch();
+      } catch (err) {
+        // Settle hook failures must not surface as fetch failures —
+        // we still want to stream whatever's already in the store.
+        // Log so the operator notices a wedged shim, then carry on.
+        console.warn("[SyncRPCServer] beforeFetch hook failed:", err);
+      }
+    }
     const sinceRev = input.sinceRev ?? 0;
     const ignore =
       input.ignore ?? (this.options.ignore.length > 0 ? this.options.ignore : DEFAULT_IGNORE);
@@ -255,7 +280,11 @@ class WorkspaceRPCServer extends RpcTarget implements WorkspaceRPC {
 // back the object to mount on each connection via
 // acceptWebSocketSession().
 export function createSyncServer(db: Database, options: ServerOptions = {}): SyncRPC {
-  return new SyncRPCServer(db, { ignore: options.ignore ?? [], afterApply: options.afterApply });
+  return new SyncRPCServer(db, {
+    ignore: options.ignore ?? [],
+    afterApply: options.afterApply,
+    beforeFetch: options.beforeFetch,
+  });
 }
 
 // Construct a ShellRPC bound to a Runner. wsd holds the only

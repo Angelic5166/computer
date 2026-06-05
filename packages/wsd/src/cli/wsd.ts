@@ -419,9 +419,9 @@ async function main(): Promise<void> {
 
   let fuse: FuseMount | undefined;
   // When running on the userspace shim, capture the typed handle
-  // so we can wire `flush()` into the SyncRPC `push` afterApply
-  // hook below. A real FUSE mount serves reads straight from the
-  // VFS, so it doesn't need an explicit settle.
+  // so we can wire `flush()` and `reconcileNow()` into the SyncRPC
+  // afterApply / beforeFetch hooks below. A real FUSE mount serves
+  // reads straight from the VFS, so it doesn't need either settle.
   let shim: ShimMount | undefined;
   if (backend.kind !== "none") {
     // The VFS stores everything under `mountPoint` so capnweb pulls,
@@ -467,7 +467,19 @@ async function main(): Promise<void> {
     // exec()/read against the host fs after a push sees the new
     // files. Real FUSE doesn't need this — the kernel-FUSE driver
     // serves reads from the VFS directly.
-    ...(shim ? { afterApply: () => shim.flush() } : {}),
+    // Symmetric shim settles:
+    //   - afterApply (push side): wait for the VFS→disk flush so
+    //     a subsequent `shell.exec` sees the just-pushed files.
+    //   - beforeFetch (pull side): wait for the disk→VFS reconcile
+    //     so a `Workspace.pull()` issued right after `shell.exec`
+    //     observes files the exec'd process just wrote, without
+    //     waiting on the next periodic poll tick.
+    ...(shim
+      ? {
+          afterApply: () => shim.flush(),
+          beforeFetch: () => shim.reconcileNow(),
+        }
+      : {}),
   });
   const http = createHTTPServer(info, rpc);
 

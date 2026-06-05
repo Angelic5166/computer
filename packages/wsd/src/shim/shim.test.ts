@@ -172,6 +172,54 @@ test("shim.flush() resolves on an unmounted shim without throwing", async (_ctx)
   await shim.flush();
 });
 
+test("shim.reconcileNow() settles disk writes into the VFS before resolving", async (_ctx) => {
+  // Mirror of the flush() test above, in the reverse direction.
+  // A very slow poll guarantees the periodic reconcile can't be
+  // serving the assertion; if reconcileNow() works the file is in
+  // the VFS as soon as the call returns.
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-reconcile-"));
+  const { vfs } = await createNodeVirtualFileSystem();
+  const shim = await mountShim({ vfs, mountPoint, pollIntervalMs: 60_000 });
+  onTestFinished(async () => {
+    await shim.unmount();
+    await fs.rm(mountPoint, { recursive: true, force: true });
+  });
+
+  await fs.mkdir(path.join(mountPoint, "proj"), { recursive: true });
+  await fs.writeFile(path.join(mountPoint, "proj", "x.txt"), "from disk");
+  await fs.writeFile(path.join(mountPoint, "proj", "y.txt"), "also from disk");
+
+  // No periodic reconcile has fired yet — the VFS is empty until
+  // reconcileNow() walks the disk.
+  expect(vfs.existsSync(`${mountPoint}/proj/x.txt`)).toBe(false);
+
+  await shim.reconcileNow();
+
+  expect(vfs.readFileSync(`${mountPoint}/proj/x.txt`).toString()).toBe("from disk");
+  expect(vfs.readFileSync(`${mountPoint}/proj/y.txt`).toString()).toBe("also from disk");
+});
+
+test("shim.reconcileNow() is idempotent and cheap on a clean tree", async (_ctx) => {
+  const { vfs, mountPoint, shim } = await setup();
+  await fs.writeFile(path.join(mountPoint, "stable.txt"), "steady");
+  await shim.reconcileNow();
+  const rev1 = vfs.statSync(`${mountPoint}/stable.txt`).mtime.getTime();
+  await shim.reconcileNow();
+  const rev2 = vfs.statSync(`${mountPoint}/stable.txt`).mtime.getTime();
+  expect(rev2).toBe(rev1, "reconcileNow on an unchanged tree should not bump VFS mtime");
+});
+
+test("shim.reconcileNow() resolves on an unmounted shim without throwing", async (_ctx) => {
+  const mountPoint = await fs.mkdtemp(path.join(os.tmpdir(), "wsd-shim-reconcile-unmount-"));
+  const { vfs } = await createNodeVirtualFileSystem();
+  const shim = await mountShim({ vfs, mountPoint, pollIntervalMs: TICK_MS });
+  onTestFinished(async () => {
+    await fs.rm(mountPoint, { recursive: true, force: true });
+  });
+  await shim.unmount();
+  await shim.reconcileNow();
+});
+
 test("shim drops VFS writes outside the mount point", async (_ctx) => {
   // Pin the cross-namespace contract that backed the original bug:
   // a write into the VFS at `${mountPoint}/foo` lands on disk at

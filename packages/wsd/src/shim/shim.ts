@@ -50,6 +50,19 @@ export interface ShimMount {
    * so flushing twice in a row is cheap.
    */
   flush(): Promise<void>;
+  /**
+   * Block until the VFS reflects the on-disk tree's current state.
+   * Called by the SyncRPC `fetchChanges` handler right before it
+   * computes the change set the puller will see, so a
+   * `Workspace.pull()` issued after `shell.exec` returns observes
+   * files the exec'd process wrote without waiting on the next
+   * periodic poll tick.
+   *
+   * Runs the same disk→VFS reconcile the polling loop runs,
+   * serialised through the same internal mutex so a request-time
+   * call can't race with the tick. Idempotent on a clean tree.
+   */
+  reconcileNow(): Promise<void>;
 }
 
 export interface MountShimOptions {
@@ -155,9 +168,13 @@ export async function mountShim(options: MountShimOptions): Promise<ShimMount> {
 
   // Disk -> VFS via periodic reconcile. Walks the mount point,
   // diffs against the shadow, applies changes to the VFS.
+  // Shared by the periodic poll below and the on-demand
+  // reconcileNow() hook; both go through `run` so they serialise
+  // against the VFS watcher loop.
+  const reconcile = (): Promise<void> => run(() => reconcileDiskToVfs(vfs, mountPoint, shadow));
   const pollTimer = setInterval(() => {
     if (stopped) return;
-    void run(() => reconcileDiskToVfs(vfs, mountPoint, shadow)).catch((error) => {
+    void reconcile().catch((error) => {
       console.error("[shim] disk reconcile failed:", error);
     });
   }, pollIntervalMs);
@@ -189,6 +206,10 @@ export async function mountShim(options: MountShimOptions): Promise<ShimMount> {
       await run(async () => {
         await flushVfsToDisk(vfs, mountPoint, shadow);
       });
+    },
+    async reconcileNow(): Promise<void> {
+      if (stopped) return;
+      await reconcile();
     },
   };
 }

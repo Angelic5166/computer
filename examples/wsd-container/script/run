@@ -18,7 +18,6 @@ BASE_URL="${BASE_URL%/}"
 NAME="${NAME:-demo}"
 PATH_VIA_API="api-wrote.txt"
 PATH_VIA_EXEC="exec-wrote.txt"
-SETTLE_SECONDS="${SETTLE_SECONDS:-3}"
 
 step() { printf '\n=== %s ===\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
@@ -41,9 +40,9 @@ curl -fsS -X POST "${BASE_URL}/c/${NAME}/exec" \
   -H 'content-type: application/json' \
   -d "{\"command\":\"echo hello-from-exec > /workspace/${PATH_VIA_EXEC} && cat /workspace/${PATH_VIA_EXEC}\",\"encoding\":\"utf8\"}"
 printf '\n'
-# The shim's reverse-direction reconciler polls on a short tick.
-# Sleep a beat so the GET below sees the new bytes the first time.
-sleep "$SETTLE_SECONDS"
+# No settle wait needed: wsd's `beforeFetch` hook runs the shim's
+# disk→VFS reconcile synchronously inside `fetchChanges`, so the
+# GET below is guaranteed to see whatever the exec just wrote.
 
 step "4. read via API: GET /c/${NAME}/file/workspace/${PATH_VIA_EXEC}"
 read_via_api=$(curl -fsS "${BASE_URL}/c/${NAME}/file/workspace/${PATH_VIA_EXEC}")

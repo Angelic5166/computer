@@ -234,6 +234,107 @@ describe("SyncRPC server — afterApply hook", () => {
   });
 });
 
+describe("SyncRPC server — beforeFetch hook", () => {
+  // Symmetric to the afterApply spy above. beforeFetch runs on the
+  // receiver right before fetchChanges streams entries, giving the
+  // host a chance to settle any out-of-band writes (e.g. wsd's shim
+  // pulling disk changes into the VFS) into the store the fetch is
+  // about to read.
+  function makeReceiverWithSpy(): {
+    db: Database;
+    rpc: SyncRPC;
+    close: () => void;
+    calls: number;
+    setBeforeFetch: (fn: () => void | Promise<void>) => void;
+  } {
+    const storage = new SQLiteTestStorage();
+    const db = new Database(storage);
+    initializeSchema(db, () => 1000);
+    let hook: () => void | Promise<void> = () => {};
+    let calls = 0;
+    const rpc = createSyncServer(db, {
+      beforeFetch: async () => {
+        calls += 1;
+        await hook();
+      },
+    });
+    return {
+      db,
+      rpc,
+      close: () => storage.close(),
+      get calls() {
+        return calls;
+      },
+      setBeforeFetch: (fn) => {
+        hook = fn;
+      },
+    };
+  }
+
+  it("fires once per fetchChanges and is awaited before entries stream", async () => {
+    const a = makePeer();
+    const b = makeReceiverWithSpy();
+    try {
+      // Stage a write in the hook itself — simulates the shim's
+      // disk→VFS reconcile picking up a file that wasn't in the VFS
+      // when pullOnce started.
+      const providerB = new SQLiteWorkspaceProvider(b.db, { now: () => 2 });
+      b.setBeforeFetch(() => {
+        providerB.writeFileSync("/late.txt", "materialised by hook");
+      });
+
+      const result = await pullOnce(a.db, b.rpc);
+      expect(b.calls).toBe(1);
+      // The pull must surface the entry the hook wrote — that's the
+      // whole point of beforeFetch existing.
+      expect(result.applied).toBeGreaterThan(0);
+      expect(fileEntries(a.db)).toContain("late.txt");
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("fires even when there are no changes to stream", async () => {
+    // Pulling against an empty receiver still has to call the hook,
+    // because the hook is what produces "any changes" in the first
+    // place — conditional firing would defeat the contract.
+    const a = makePeer();
+    const b = makeReceiverWithSpy();
+    try {
+      const result = await pullOnce(a.db, b.rpc);
+      expect(b.calls).toBe(1);
+      expect(result.applied).toBe(0);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
+  it("a thrown hook does not fail the fetch", async () => {
+    const a = makePeer();
+    const b = makeReceiverWithSpy();
+    try {
+      const providerB = new SQLiteWorkspaceProvider(b.db, { now: () => 2 });
+      providerB.writeFileSync("/already-there.txt", "x");
+
+      b.setBeforeFetch(() => {
+        throw new Error("reconcile blew up");
+      });
+
+      // The fetch must still succeed and return the pre-existing
+      // entry. The receiver logs and swallows hook errors.
+      const result = await pullOnce(a.db, b.rpc);
+      expect(b.calls).toBe(1);
+      expect(result.applied).toBe(1);
+      expect(fileEntries(a.db)).toContain("already-there.txt");
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+});
+
 describe("sync driver — bidirectional convergence", () => {
   it("two peers writing in parallel converge after a few ticks", async () => {
     const a = makePeer();
