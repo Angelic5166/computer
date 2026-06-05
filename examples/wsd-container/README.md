@@ -119,9 +119,9 @@ POST /c/<name>/exec             { command | argv, cwd?, encoding? }
 ## Run it locally
 
 Requires Docker. The Dockerfile pulls
-`registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>`
-from the public Cloudflare registry on first build, so no local
-image prep is needed.
+`ghcr.io/cloudflare/workspace-wsd-linux-x64:<version>` from the
+public GitHub Container Registry on first build, so no local image
+prep is needed.
 
 ```sh
 npm run dev --workspace @cloudflare/example-wsd-container

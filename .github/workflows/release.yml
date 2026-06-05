@@ -10,36 +10,41 @@
 #      publish under the matching suffix (`alpha`, `beta`, `rc`)
 #      so plain `npm i @cloudflare/workspace` doesn't pick them up;
 #      stable tags (no suffix) publish under `latest`.
-#   6. Pushes the wsd binary image to registry.cloudflare.com.
-#      Stable releases also move the `:latest` registry tag;
-#      prereleases only push the version-specific tag.
+#   6. Pushes the wsd binary image to two registries: ghcr.io (the
+#      canonical public source the example Dockerfiles reference)
+#      and registry.cloudflare.com (so wrangler / Containers can
+#      pull from inside Cloudflare's platform without an outbound
+#      hop). Stable releases also move each registry's `:latest`
+#      tag; prereleases only push the version-specific tag.
 #
 # The wsd binary is shipped two ways:
 #   - inside the @cloudflare/workspace npm tarball at dist/bin/
 #     wsd-linux-x64, so consumers installing the package get it for
 #     free; and
-#   - as a single-layer container image at
-#     registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>
-#     (plus :latest), so downstream Dockerfiles can
-#     `COPY --from=registry.cloudflare.com/library/...` without
-#     installing npm first.
+#   - as a single-layer container image, mirrored to both
+#     ghcr.io/cloudflare/workspace-wsd-linux-x64 and
+#     registry.cloudflare.com/library/workspace-wsd-linux-x64. The
+#     example Dockerfiles pin the GHCR coordinate (anonymous pulls,
+#     no Cloudflare-account dependency); the CF copy is kept for
+#     consumers that prefer to stay on the in-platform registry.
 #
 # npm packages use trusted publishing (OIDC); no NPM_TOKEN is
 # needed, only the workflow's `id-token: write` permission plus a
 # trusted publisher config on the @cloudflare scope that names
 # this repo + this workflow file.
 #
-# Image pushes use a short-lived credential minted via the CF API
-# at registry.cloudflare.com/v4 (see .github/cf-registry-login.sh).
-# Required repository secrets:
-#   CLOUDFLARE_API_TOKEN  - scoped for Container Registry Write on
-#                           the target account; the credential
-#                           endpoint mints library_push tokens off
-#                           this.
-#   CLOUDFLARE_ACCOUNT_ID - account that owns the registry. The
-#                           library/ namespace is account-scoped
-#                           even though images appear under the
-#                           public library/ path.
+# Image pushes need:
+#   - `packages: write` on the workflow's GITHUB_TOKEN (auto-
+#     injected; used to authenticate to ghcr.io).
+#   - Repository secrets CLOUDFLARE_API_TOKEN (scoped for Container
+#     Registry Write on the target account) and
+#     CLOUDFLARE_ACCOUNT_ID (used by .github/cf-registry-login.sh to
+#     mint a short-lived library_push credential).
+#
+# One manual step is needed once, after the first push of the GHCR
+# package: flip the package visibility to Public at
+#   https://github.com/orgs/cloudflare/packages/container/workspace-wsd-linux-x64/settings
+# Subsequent pushes inherit the public visibility automatically.
 #
 # Triggers:
 #   - push: tags ['v*']  — the normal release path
@@ -72,6 +77,8 @@ jobs:
       # Trusted publishing on npm requires the OIDC id-token.
       id-token: write
       contents: read
+      # GHCR push uses GITHUB_TOKEN with `packages: write`.
+      packages: write
     if: ${{ github.repository_owner == 'cloudflare' }}
     env:
       # Used everywhere a version string is needed below. The push
@@ -163,6 +170,13 @@ jobs:
       - name: Set up buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # Mint a short-lived credential and log docker in to the
       # Cloudflare registry. The login script handles transient
       # failures and surfaces permanent ones as ::error::.
@@ -176,9 +190,11 @@ jobs:
           echo "$CF_REGISTRY_PASSWORD" | docker login registry.cloudflare.com \
             -u "$CF_REGISTRY_USERNAME" --password-stdin
 
-      # The version-specific tag always goes out. The `:latest` tag
-      # only moves on stable releases; an empty trailing line in the
-      # `tags` list is tolerated by build-push-action.
+      # The version-specific tag always goes out to both registries.
+      # The `:latest` tag only moves on stable releases; empty
+      # trailing lines in the `tags` list are tolerated by
+      # build-push-action. One buildx invocation pushes to both
+      # registries in parallel, sharing the layer build.
       - name: Build and push wsd-linux-x64 image
         uses: docker/build-push-action@v6
         with:
@@ -187,6 +203,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
+            ghcr.io/cloudflare/workspace-wsd-linux-x64:${{ steps.release-meta.outputs.version }}
+            ${{ steps.release-meta.outputs.is_stable == 'true' && 'ghcr.io/cloudflare/workspace-wsd-linux-x64:latest' || '' }}
             registry.cloudflare.com/library/workspace-wsd-linux-x64:${{ steps.release-meta.outputs.version }}
             ${{ steps.release-meta.outputs.is_stable == 'true' && 'registry.cloudflare.com/library/workspace-wsd-linux-x64:latest' || '' }}
           provenance: false

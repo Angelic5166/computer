@@ -1,10 +1,10 @@
 # Container image for the wsd-container example.
 #
-# Pulls the wsd binary out of the public Cloudflare registry image.
-# That image is a single layer over `scratch` whose only contents
-# are the SEA binary at /usr/local/bin/wsd; we COPY it into a slim
-# debian runtime below. The :VERSION tag is rewritten in lockstep
-# with the rest of the monorepo by scripts/set-versions.mjs.
+# Pulls the wsd binary out of the public GHCR image. That image is
+# a single layer over `scratch` whose only contents are the SEA
+# binary at /usr/local/bin/wsd; we COPY it into a slim debian
+# runtime below. The :VERSION tag is rewritten in lockstep with
+# the rest of the monorepo by scripts/set-versions.mjs.
 #
 # wsd mounts a FUSE filesystem at MOUNT_POINT so exec'd commands
 # see the same VFS the RPC surface reads and writes. With
@@ -13,7 +13,7 @@
 # real FUSE backend mounts; `wrangler dev` doesn't, so wsd falls
 # back to the userspace shim transparently.
 
-FROM --platform=linux/amd64 registry.cloudflare.com/library/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
+FROM --platform=linux/amd64 ghcr.io/cloudflare/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
 
 FROM --platform=linux/amd64 debian:stable-slim
 

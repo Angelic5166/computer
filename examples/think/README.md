@@ -110,8 +110,8 @@ workspace lifetime).
 ## Running it locally
 
 Requires Docker. The Dockerfile pulls
-`registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>`
-from the public Cloudflare registry on first build; no local image
+`ghcr.io/cloudflare/workspace-wsd-linux-x64:<version>` from the
+public GitHub Container Registry on first build; no local image
 prep is needed.
 
 ```sh
