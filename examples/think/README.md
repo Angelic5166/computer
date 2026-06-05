@@ -1,5 +1,12 @@
 # `@cloudflare/think` triage example
 
+> [!IMPORTANT]
+> **PREVIEW ONLY** This package is provided as a preview for feedback only.
+> APIs are unstable and the design is subject to change.
+>
+> Suitable for experiments, exploration and prototypes. It is NOT suitable
+> for production use at this time.
+
 A small end-to-end example that uses [`@cloudflare/think`][think] and
 [`agents/workflows`][workflows] to triage a GitHub issue. The agent
 runs inside a [Cloudflare Container][containers] holding a

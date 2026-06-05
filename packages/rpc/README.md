@@ -1,5 +1,15 @@
 # `@cloudflare/workspace-rpc`
 
+> [!IMPORTANT]
+> **PREVIEW ONLY** This package is provided as a preview for feedback only.
+> APIs are unstable and the design is subject to change.
+>
+> Suitable for experiments, exploration and prototypes. It is NOT suitable
+> for production use at this time.
+>
+> The specification under [`docs/`](docs/) is forward-looking — read it for
+> intent, not as description of the code today.
+
 capnweb-based RPC wire types and server/client helpers shared
 between the DO and `wsd`. The package is split into four entry
 points:

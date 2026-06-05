@@ -1,5 +1,15 @@
 # `@cloudflare/workspace-wsd`
 
+> [!IMPORTANT]
+> **PREVIEW ONLY** This package is provided as a preview for feedback only.
+> APIs are unstable and the design is subject to change.
+>
+> Suitable for experiments, exploration and prototypes. It is NOT suitable
+> for production use at this time.
+>
+> The specification under [`docs/`](docs/) is forward-looking — read it for
+> intent, not as description of the code today.
+
 Workspace daemon CLI and FUSE mount package.
 
 ## `wsd`

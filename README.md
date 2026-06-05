@@ -6,10 +6,15 @@ mount. The Durable Object holds the authoritative state in SQLite; a
 sandbox-side daemon (`wsd`) mounts that state as a filesystem and syncs
 changes back over a capnweb RPC channel.
 
-> **Status: prototype.** APIs are unstable and the design is still
-> moving. The specification under [`docs/`](docs/) is forward-looking
-> and has diverged from `main` in places — read it for intent, not as a
-> description of the code today.
+> [!IMPORTANT]
+> **PREVIEW ONLY** This package is provided as a preview for feedback only.
+> APIs are unstable and the design is subject to change.
+>
+> Suitable for experiments, exploration and prototypes. It is NOT suitable
+> for production use at this time.
+>
+> The specification under [`docs/`](docs/) is forward-looking — read it for
+> intent, not as description of the code today.
 
 ## Requirements
 

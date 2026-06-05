@@ -1,12 +1,14 @@
 # `@cloudflare/workspace`
 
 > [!IMPORTANT]
-> This document has been brought into line with what ships on `main`.
-> A handful of items remain **aspirational** — mounts, agent tools,
-> garbage collection, and the `prefetch`/`warmup` ergonomics — and are
-> explicitly marked **(not yet implemented)** wherever they appear so
-> the doorway doc stays honest about what runs today versus what we're
-> moving toward.
+> **PREVIEW ONLY** This package is provided as a preview for feedback only.
+> APIs are unstable and the design is subject to change.
+>
+> Suitable for experiments, exploration and prototypes. It is NOT suitable
+> for production use at this time.
+>
+> The specification under [`docs/`](docs/) is forward-looking — read it for
+> intent, not as description of the code today.
 
 The `@cloudflare/workspace` package provides an out of the box virtual filesystem for use in any Durable Object — it's persistent and backed by SQLite. It's primarily designed for agents that need small, portable filesystems and tools to work with.
 
