@@ -8,15 +8,32 @@
 #   5. Publishes @cloudflare/workspace with --tag alpha (so plain
 #      `npm i @cloudflare/workspace` doesn't pick up alphas).
 #
-# The wsd binary and Docker image are intentionally not published
-# yet. The build steps stay so a broken binary fails the release
-# loudly; flip the publish steps back on once distribution is
-# wanted.
+# The wsd binary is shipped two ways:
+#   - inside the @cloudflare/workspace npm tarball at dist/bin/
+#     wsd-linux-x64, so consumers installing the package get it for
+#     free; and
+#   - as a single-layer container image at
+#     registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>
+#     (plus :latest), so downstream Dockerfiles can
+#     `COPY --from=registry.cloudflare.com/library/...` without
+#     installing npm first.
 #
 # npm packages use trusted publishing (OIDC); no NPM_TOKEN is
 # needed, only the workflow's `id-token: write` permission plus a
 # trusted publisher config on the @cloudflare scope that names
 # this repo + this workflow file.
+#
+# Image pushes use a short-lived credential minted via the CF API
+# at registry.cloudflare.com/v4 (see .github/cf-registry-login.sh).
+# Required repository secrets:
+#   CLOUDFLARE_API_TOKEN  - scoped for Container Registry Write on
+#                           the target account; the credential
+#                           endpoint mints library_push tokens off
+#                           this.
+#   CLOUDFLARE_ACCOUNT_ID - account that owns the registry. The
+#                           library/ namespace is account-scoped
+#                           even though images appear under the
+#                           public library/ path.
 #
 # Triggers:
 #   - push: tags ['v*']  — the normal release path
@@ -104,3 +121,49 @@ jobs:
 
       - name: Publish @cloudflare/workspace
         run: npm publish --workspace @cloudflare/workspace --tag alpha --provenance --access public
+
+      # Stage the SEA binary into the wsd-linux-x64 package's bin/
+      # directory — that package's Dockerfile copies from `bin/wsd`
+      # against a `scratch` base, producing a single-layer image
+      # whose only purpose is to ship the binary at a known path.
+      - name: Stage binary into @cloudflare/workspace-wsd-linux-x64
+        run: |
+          mkdir -p packages/wsd-linux-x64/bin
+          cp artifacts/wsd/wsd-linux-x64 packages/wsd-linux-x64/bin/wsd
+          chmod +x packages/wsd-linux-x64/bin/wsd
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Mint a short-lived credential and log docker in to the
+      # Cloudflare registry. The login script handles transient
+      # failures and surfaces permanent ones as ::error::.
+      - name: Log in to registry.cloudflare.com
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          source .github/cf-registry-login.sh
+          cf_registry_credentials 30 '["pull", "push", "library_push"]'
+          echo "$CF_REGISTRY_PASSWORD" | docker login registry.cloudflare.com \
+            -u "$CF_REGISTRY_USERNAME" --password-stdin
+
+      # Strip the leading `v` from the release tag so the image
+      # tag matches the npm version (e.g. v0.1.0-alpha.1 -> 0.1.0-alpha.1).
+      - name: Compute image version
+        id: image-version
+        run: |
+          version="${RELEASE_TAG#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push wsd-linux-x64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/wsd-linux-x64
+          file: packages/wsd-linux-x64/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            registry.cloudflare.com/library/workspace-wsd-linux-x64:${{ steps.image-version.outputs.version }}
+            registry.cloudflare.com/library/workspace-wsd-linux-x64:latest
+          provenance: false
