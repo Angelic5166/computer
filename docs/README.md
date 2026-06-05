@@ -66,7 +66,7 @@ EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/wsd"]
 ```
 
-`wsd`'s own default port is `45678`; the Cloudflare container backend pins the in-image listener to `8080`, which is what `examples/wsd-container/` uses. See [07. Injected Service](./07_injected_service.md) for the env vars (`PORT`, `MOUNT_POINT`, `DISABLE_FUSE`, `UPSTREAM_URL`, `EXEC_LOG_MAX_BYTES`, `WSD_FUSE_BACKEND`) and the reverse-dial boot sequence.
+`wsd`'s own default port is `45678`; the Cloudflare container backend pins the in-image listener to `8080`, which is what `examples/wsd-container/` uses. See [07. Injected Service](./07_injected_service.md) for the env vars (`PORT`, `MOUNT_POINT`, `FUSE_MOUNT`, `UPSTREAM_URL`, `EXEC_LOG_MAX_BYTES`) and the reverse-dial boot sequence.
 
 ## Example
 

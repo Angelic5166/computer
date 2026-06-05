@@ -8,7 +8,7 @@ description: Debug wsd in real-FUSE mode end-to-end without workerd, vitest-pool
 This skill captures the recipe for isolating bugs in wsd that only
 fire when the kernel-FUSE backend is the one wired up. Most unit
 tests run against `SQLiteTestStorage` and an in-process VFS or the
-userspace `FUSE_SHIM` polling driver — neither exercises the
+userspace `FUSE_MOUNT=shim` polling driver — neither exercises the
 kernel-FUSE callback path. Several production-only bugs (write
 buffer never spilled to the VFS, `spawn(cwd=/mount)` deadlocks)
 have shipped to `next` and not been caught by the regular suites
@@ -80,10 +80,10 @@ for i in 1 2 3 4 5; do
 done
 ```
 
-**`backend=linux` is the success signal.** If you see `backend=shim`
+**`backend=fuse` is the success signal.** If you see `backend=shim`
 the FUSE mount didn't take and you're testing the wrong path.
-`backend=none` means `DISABLE_FUSE=1` was set or detection failed
-outright — usually a missing `/dev/fuse`.
+`backend=none` means `FUSE_MOUNT=none` was set; `FUSE_MOUNT=fuse`
+with a missing `/dev/fuse` would have failed startup outright.
 
 ## Drive wsd from a Node script
 

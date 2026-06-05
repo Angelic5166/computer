@@ -80,28 +80,28 @@ Security / kernel extension approval. FUSE-T is intentionally
 unsupported — the libfuse2 surface our `fuse-native` dependency
 wraps does not work against the FUSE-T userland.
 
-You can override backend detection for debugging:
+Pick the backend with `FUSE_MOUNT`:
 
 ```sh
-WSD_FUSE_BACKEND=auto    # default: detect macFUSE on macOS, /dev/fuse on linux
-WSD_FUSE_BACKEND=macfuse # require macFUSE
-WSD_FUSE_BACKEND=linux   # require /dev/fuse
+FUSE_MOUNT=auto    # default: probe /dev/fuse or macFUSE, fall back to the userspace shim
+FUSE_MOUNT=fuse    # require the linux kernel FUSE backend (/dev/fuse)
+FUSE_MOUNT=macfuse # require macFUSE on darwin
+FUSE_MOUNT=shim    # force the userspace dev shim (no FUSE)
+FUSE_MOUNT=none    # skip the mount entirely; HTTP + /api + /ws still come up
 ```
 
 Additional environment variables:
 
 ```sh
-DISABLE_FUSE=1                   # skip the FUSE mount; keep HTTP + RPC running
-FUSE_SHIM=1                      # opt into the userspace dev shim (no FUSE)
 UPSTREAM_URL=https://example/ws  # open a SyncClient against this capnweb endpoint
 EXEC_LOG_MAX_BYTES=1048576       # cap the in-memory exec log buffer (bytes)
 ```
 
-If FUSE is unavailable, `wsd` exits non-zero rather than falling back to a plain directory. Set `DISABLE_FUSE=1` to skip the FUSE mount entirely while keeping the HTTP server and `/api` + `/ws` RPC endpoints alive — handy for tests and tooling that don't need `/dev/fuse`.
+`FUSE_MOUNT=auto` is the friendly default: if `/dev/fuse` (or macFUSE) is available `wsd` mounts a real FUSE filesystem, otherwise it transparently falls back to the userspace shim. Pin the value (`fuse` / `macfuse` / `shim` / `none`) when a test needs to assert a specific code path.
 
-## `FUSE_SHIM=1` — userspace dev shim
+## `FUSE_MOUNT=shim` — userspace dev shim
 
-When `FUSE_SHIM=1` is set, `wsd` materialises the VFS subtree rooted at `MOUNT_POINT` onto the host filesystem at the same path and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
+When `FUSE_MOUNT=shim` is set (or auto-detection picked it because no kernel FUSE was available), `wsd` materialises the VFS subtree rooted at `MOUNT_POINT` onto the host filesystem at the same path and keeps the two in sync without touching the kernel. The shim is intended for local development on machines that can't run FUSE (most CI, macOS without macFUSE, Linux containers without `/dev/fuse`).
 
 How it works:
 
@@ -117,7 +117,7 @@ Caveats. The shim is dev-only:
 - Conflicting writes across the seam are resolved on the next reconcile tick; the shim does not guarantee process-level coherence.
 - Symlinks, xattrs, chmod/chown, and watch fan-out are not modelled. Real FUSE keeps them; the shim treats files and directories only.
 - Large files cost a full read on every change. Don't park multi-GB blobs in the shim path.
-- `FUSE_SHIM=1` and `DISABLE_FUSE=1` are mutually exclusive; passing both makes `wsd` exit non-zero at startup.
+- Migration: `DISABLE_FUSE`, `FUSE_SHIM`, and `WSD_FUSE_BACKEND` have been removed in favour of `FUSE_MOUNT`. `wsd` exits non-zero at startup if any of the old vars are set.
 
 ## Tests
 

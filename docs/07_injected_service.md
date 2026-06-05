@@ -29,8 +29,8 @@ staging the binary into a container image.
 1. **FUSE mount.** Mounts the in-container VFS at `MOUNT_POINT`
    (default `/workspace`) so any tool that runs inside the container —
    node, shells, compilers — sees the same tree the DO sees, with the
-   same paths. The backend is auto-detected (`detectFUSEBackend()`)
-   and can be pinned via `WSD_FUSE_BACKEND`.
+   same paths. The backend is picked by `FUSE_MOUNT` (default `auto`,
+   see the env-var table below).
 2. **Dirty tracking.** Writes that flow through FUSE land in the
    in-container VFS database; sync (when `UPSTREAM_URL` is set) is
    what surfaces those revisions back out. See doc 02 for the sync
@@ -77,7 +77,7 @@ RUN chmod +x /usr/local/bin/wsd
 
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
-ENV DISABLE_FUSE=1
+ENV FUSE_MOUNT=auto
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/wsd"]
@@ -106,8 +106,8 @@ Provider-agnostic shape — three steps, in order:
    it returns `200`. Caveat: `/health` is wired by the HTTP server and
    answers `200` as soon as the socket binds. In the FUSE-enabled
    path the mount is awaited *before* `listen`, so by the time
-   `/health` answers FUSE is up too. With `DISABLE_FUSE=1` (the
-   Cloudflare backend's default) there is no FUSE step at all.
+   `/health` answers FUSE is up too. With `FUSE_MOUNT=none` there is
+   no FUSE step at all.
 3. **Open the capnweb session.** Either the host upgrades to `/ws`
    directly, or it asks `wsd` (via `POST /connect`) to dial *out* to a
    URL it controls and serve the session over that outbound socket.
@@ -123,8 +123,8 @@ wires it like this:
    Idempotence comes from `container.running` plus a cached `#handle`;
    there is no process-name registry, no `startProcess`/`getProcess`,
    and no `node /app/...` command (the container's `ENTRYPOINT` runs
-   `wsd` directly). `containerEnv` pins `PORT=8080` and
-   `DISABLE_FUSE=1`.
+   `wsd` directly). `containerEnv` pins `PORT=8080` and lets the
+   image's own `FUSE_MOUNT` value (typically `auto`) win.
 2. **Wire egress.** `container.interceptOutboundHttp(egressHost, egress)`
    routes outbound HTTP from the container at `egressHost` back to a
    Worker `Fetcher` the DO controls.
@@ -159,12 +159,11 @@ These are the variables `wsd` actually consumes (see
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `45678` | Port the HTTP/WS server listens on. CF backend pins this to `8080`. |
-| `MOUNT_POINT` | `/workspace` | Absolute path inside the container to mount the FUSE filesystem at. Ignored when `DISABLE_FUSE=1`. |
-| `DISABLE_FUSE` | unset | If set (e.g. `1`), skip FUSE entirely. The CF backend sets this because Cloudflare Containers doesn't expose `/dev/fuse` yet. |
+| `MOUNT_POINT` | `/workspace` | Absolute path inside the container to mount the FUSE filesystem at. Ignored when `FUSE_MOUNT=none`. |
+| `FUSE_MOUNT` | `auto` | Backend selector: `auto` probes `/dev/fuse` (linux) or macFUSE (darwin) and falls back to the userspace shim; `fuse` / `macfuse` require the corresponding real backend; `shim` forces the userspace shim; `none` skips the mount entirely. |
 | `UPSTREAM_URL` | unset | If set, `wsd` starts a sync client against this URL to push/pull VFS revisions. |
 | `EXEC_LOG_MAX_BYTES` | runner default | Caps the per-exec stdout/stderr log retained in-memory. |
 | `LOG_FILE` | unset | If set, every `console.log` / `console.error` line and any `uncaughtException` / `unhandledRejection` is also appended to this file. Stdout/stderr behaviour is unchanged. |
-| `WSD_FUSE_BACKEND` | autodetect | Pin a specific FUSE backend instead of letting `detectFUSEBackend()` choose. |
 
 When `LOG_FILE` is set, `wsd` mirrors console output into the file in
 addition to stdout/stderr. See "Failure handling" below for the crash
@@ -182,11 +181,11 @@ Today:
   `console.log` / `console.error` line is also appended to that file
   (open in `O_APPEND` mode, ISO-timestamped, `[info]` / `[error]`
   prefixed). No rotation; the operator is expected to manage the file.
-- If `detectFUSEBackend()` returns `{ kind: "none" }` and
-  `DISABLE_FUSE` is not set, `main()` throws and the process exits
-  non-zero. **There is no `fuseActive=false` degraded mode and no
-  host-filesystem mirror fallback** — the only "graceful skip FUSE"
-  path is the explicit `DISABLE_FUSE=1` opt-out.
+- `FUSE_MOUNT=fuse` (or `macfuse`) errors at startup if the
+  corresponding kernel surface isn't available; `FUSE_MOUNT=auto`
+  silently falls back to the userspace shim instead. The only
+  "skip the mount entirely" path is the explicit `FUSE_MOUNT=none`
+  opt-out.
 
 **Planned** (tracked in `PLAN.md`):
 

@@ -59,8 +59,8 @@ jobs:
             path: packages/wsd
             needs-siblings: true
             # libfuse2 (libfuse.so.2) is what fuse-native binds to at
-            # runtime; fuse3 ships /dev/fuse helpers and the FUSE_SHIM
-            # tests need it for the userspace mount path.
+            # runtime; fuse3 ships /dev/fuse helpers and the
+            # FUSE_MOUNT=shim tests need it for the userspace mount path.
             system-deps: "libfuse2t64 fuse3"
     steps:
       - uses: actions/checkout@v6

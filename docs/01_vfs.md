@@ -109,9 +109,13 @@ to use any naming convention you like for your own data.
 ## Sandbox view
 
 `wsd` (the in-container daemon) mounts the VFS at `MOUNT_POINT`
-(default `/workspace`) via FUSE by default. **However, the only
-shipped backend, `CloudflareContainerBackend`, pins `DISABLE_FUSE=1`**
-when it starts the container. In that configuration:
+(default `/workspace`) via FUSE by default. The backend is picked
+by the in-image `FUSE_MOUNT` env var (`auto` by default; see doc 07).
+On Cloudflare Containers `/dev/fuse` is exposed and the real kernel
+FUSE backend mounts; under `wrangler dev` it isn't, and `auto` falls
+back to the userspace shim. Either way the in-container view is a
+live mirror of the DO-side VFS. Earlier revisions of `CloudflareContainerBackend`
+pinned `DISABLE_FUSE=1`, which produced a degraded mode where:
 
 - The in-container filesystem at `/workspace` is the container's own
   FS, not a FUSE-backed view of the DO-side VFS.
@@ -126,11 +130,11 @@ when it starts the container. In that configuration:
 - Container-local paths *outside* `/workspace` (e.g. `/usr`, `/tmp`,
   `/app`) are the container's own filesystem and are not synced.
 
-FUSE is the target end-state for full sandbox parity — when enabled,
-reads route through the FUSE driver to the in-container VFS mirror
-and writes are recorded as dirty and pulled back to the DO on the
-next bracket. It is implemented in `wsd` (see
-`packages/wsd/src/fuse/`) and gated on `DISABLE_FUSE` being unset.
+FUSE is the default for full sandbox parity — when enabled, reads
+route through the FUSE driver to the in-container VFS mirror and
+writes are recorded as dirty and pulled back to the DO on the next
+bracket. It is implemented in `wsd` (see `packages/wsd/src/fuse/`)
+and selected via `FUSE_MOUNT` (any value other than `none`).
 
 See [06. Mount Interface](./06_mount_interface.md) for mount
 semantics and [02. Sync Protocol](./02_sync_protocol.md) for how the
