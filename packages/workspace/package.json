@@ -3,6 +3,11 @@
   "version": "0.1.0-alpha.1",
   "description": "Cloudflare Workspace — a SQLite-backed virtual filesystem with sync to a container-side daemon (wsd).",
   "license": "MIT",
+  "repository": {
+    "directory": "packages/workspace",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/workspace.git"
+  },
   "private": false,
   "type": "module",
   "exports": {
