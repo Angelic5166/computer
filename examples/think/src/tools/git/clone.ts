@@ -63,7 +63,6 @@ export function createGitCloneTool(opts: GitCloneToolOptions) {
         dir: dest,
         ref,
         depth: depth ?? depthDefault,
-        cache: opts.cache,
       });
       return {
         ok: true,
