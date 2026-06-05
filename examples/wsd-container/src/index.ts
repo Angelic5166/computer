@@ -96,12 +96,19 @@ interface ExecRequest {
   encoding?: "utf8";
 }
 
+// wsd mounts the VFS at /workspace inside the container. All file
+// paths in this example are anchored at that mount point so an
+// exec'd `cat /workspace/<x>` sees the same bytes a previous PUT
+// wrote, and so the R2 mount at /workspace/r2 sits next to user
+// writes rather than in some parallel namespace.
+const MOUNT_ROOT = "/workspace";
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     const fileMatch = url.pathname.match(/^\/c\/([^/]+)\/file\/(.+)$/);
-    if (fileMatch) return handleFile(request, env, fileMatch[1], `/${fileMatch[2]}`);
+    if (fileMatch) return handleFile(request, env, fileMatch[1], `${MOUNT_ROOT}/${fileMatch[2]}`);
 
     const execMatch = url.pathname.match(/^\/c\/([^/]+)\/exec\/?$/);
     if (execMatch) return handleExec(request, env, execMatch[1]);
@@ -184,7 +191,10 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   const stub = env.ContainerExample.get(env.ContainerExample.idFromName(name));
   const ws = await stub.getWorkspace();
   try {
-    const handle = await ws.shell.exec(command, { cwd: body.cwd, encoding: "utf8" });
+    const handle = await ws.shell.exec(command, {
+      cwd: body.cwd ?? MOUNT_ROOT,
+      encoding: "utf8",
+    });
     const result = await handle.result();
     return new Response(JSON.stringify(result), {
       status: 200,

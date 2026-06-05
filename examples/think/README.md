@@ -109,10 +109,14 @@ workspace lifetime).
 
 ## Running it locally
 
+Requires Docker. The Dockerfile pulls
+`registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>`
+from the public Cloudflare registry on first build; no local image
+prep is needed.
+
 ```sh
 # From the repo root:
 npm install
-npm run build:wsd --workspace @cloudflare/example-think
 
 # Two terminals — worker on one, CLI on the other.
 cd examples/think

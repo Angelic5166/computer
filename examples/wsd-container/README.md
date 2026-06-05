@@ -59,9 +59,23 @@ The DO extends the plain `DurableObject` class from
 `cloudflare:workers`. The container lifecycle plumbing all lives
 in `CloudflareContainerBackend` — the DO is a thin host.
 
-The container mounts wsd's VFS at `MOUNT_POINT` via FUSE, so
+The container mounts wsd's VFS at `MOUNT_POINT` (`/workspace`) so
 `exec`'d commands see the same tree the RPC surface reads and
-writes. Cloudflare Containers expose `/dev/fuse` to the workload.
+writes. On Cloudflare Containers `/dev/fuse` is exposed and the
+real FUSE backend mounts; under `wrangler dev` the same image
+transparently falls back to the userspace shim (`FUSE_MOUNT=auto`
+in the Dockerfile).
+
+## Paths
+
+**All file paths in this example are anchored at `/workspace`.** A
+PUT to `/c/<name>/file/hello.txt` writes `/workspace/hello.txt` in
+the VFS, and an exec'd `cat /workspace/hello.txt` sees the same
+bytes. `exec` requests default `cwd` to `/workspace` so relative
+paths Just Work.
+
+Write outside the mount and exec won't see it: that's by design
+and it's the one thing this example exists to demonstrate.
 
 ## R2 mount
 
@@ -86,30 +100,30 @@ npm run seed:r2 --workspace @cloudflare/example-wsd-container
 Then:
 
 ```sh
-curl http://127.0.0.1:8787/c/demo/file/workspace/r2/hello.txt
+curl http://127.0.0.1:8787/c/demo/file/r2/hello.txt
 # => hello world
 ```
 
 ## HTTP surface
 
 ```
-PUT  /c/<name>/file/<path...>   raw body → wsd writeFile
-GET  /c/<name>/file/<path...>   octet-stream of file bytes
+PUT  /c/<name>/file/<path...>   raw body → wsd writeFile at /workspace/<path>
+GET  /c/<name>/file/<path...>   octet-stream of /workspace/<path>
 POST /c/<name>/exec             { command | argv, cwd?, encoding? }
+                                cwd defaults to /workspace
                                 → JSON { exitCode, stdout, stderr }
-
 ```
 
 `<name>` selects a DO instance; each gets its own container.
 
 ## Run it locally
 
-Requires Docker.
+Requires Docker. The Dockerfile pulls
+`registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>`
+from the public Cloudflare registry on first build, so no local
+image prep is needed.
 
 ```sh
-# Boot the example. predev builds the wsd docker image
-# (cloudflare/workspace-wsd-linux-x64:VERSION) so the example's
-# Dockerfile can COPY --from it.
 npm run dev --workspace @cloudflare/example-wsd-container
 ```
 
@@ -119,17 +133,18 @@ Smoke test:
 # Trigger the container (first call also boots wsd + the capnweb session).
 curl http://127.0.0.1:8787/c/demo/health
 
-# Write a file
+# Write a file at /workspace/hello.txt
 echo 'hello' | curl -X PUT --data-binary @- \
   http://127.0.0.1:8787/c/demo/file/hello.txt
 
 # Read it back
 curl http://127.0.0.1:8787/c/demo/file/hello.txt
 
-# Exec a command
+# Exec a command — cwd defaults to /workspace, so the relative path
+# reads the file the previous PUT wrote.
 curl -X POST http://127.0.0.1:8787/c/demo/exec \
   -H 'content-type: application/json' \
-  -d '{"command":"echo hi && uname -a","encoding":"utf8"}'
+  -d '{"command":"cat hello.txt && uname -a","encoding":"utf8"}'
 ```
 
 ## Layout
@@ -143,13 +158,6 @@ examples/wsd-container/
 
 ## Known limitations / next steps
 
-- **Local `wrangler dev` won't run this image.** The container
-  mounts FUSE on boot, which needs `/dev/fuse` plus CAP_SYS_ADMIN.
-  Cloudflare Containers grant both to deployed workloads; the
-  local container runtime `wrangler dev` shells out to does not,
-  and there's no flag to opt in. wsd exits with a mount-permission
-  error before `/health` ever comes up. To exercise the example
-  end-to-end you have to `wrangler deploy` it.
 - **Exec is run-and-collect, not streamed.** The handler awaits
   `handle.result()` and emits one JSON response. Live streaming needs
   the DO to expose an async-iterable RPC; v1 keeps the surface flat.

@@ -1,13 +1,14 @@
 # Container image for the think example. Identical wiring to
-# examples/wsd-container — we pull a wsd binary from the
-# cloudflare/workspace-wsd-linux-x64 image staged by the predev /
-# predeploy hooks, drop it into a slim debian, and run it as PID 1.
+# examples/wsd-container — we pull a wsd binary out of the public
+# Cloudflare registry image, drop it into a slim debian, and run
+# it as PID 1. The :VERSION tag is rewritten in lockstep with the
+# rest of the monorepo by scripts/set-versions.mjs.
 #
 # wsd mounts a FUSE filesystem at MOUNT_POINT so exec'd commands
 # (git, npm, vitest, …) see the same files the Workspace RPC
 # surface reads and writes.
 
-FROM --platform=linux/amd64 cloudflare/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
+FROM --platform=linux/amd64 registry.cloudflare.com/library/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
 
 FROM --platform=linux/amd64 debian:stable-slim
 

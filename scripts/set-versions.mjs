@@ -21,6 +21,14 @@ const PACKAGES = [
   "packages/wsd/package.json",
 ];
 
+// Example Dockerfiles pin a specific
+// registry.cloudflare.com/library/workspace-wsd-linux-x64:<version>
+// in their first FROM line. Bump it in lockstep with the npm
+// version so a `git clone && wrangler dev` against any release tag
+// pulls the matching wsd image.
+const DOCKERFILES = ["examples/think/Dockerfile", "examples/wsd-container/Dockerfile"];
+const WSD_IMAGE_TAG_RE = /(registry\.cloudflare\.com\/library\/workspace-wsd-linux-x64:)[^\s]+/g;
+
 const raw = argv[2];
 if (raw === undefined) {
   console.error("usage: set-versions.mjs <version>");
@@ -38,4 +46,17 @@ for (const pkg of PACKAGES) {
   json.version = version;
   await writeFile(pkg, `${JSON.stringify(json, null, 2)}\n`);
   console.log(`${pkg}: version → ${version}`);
+}
+
+for (const dockerfile of DOCKERFILES) {
+  const before = await readFile(dockerfile, "utf8");
+  if (!WSD_IMAGE_TAG_RE.test(before)) {
+    console.error(`${dockerfile}: no wsd-linux-x64 image tag matched ${WSD_IMAGE_TAG_RE}`);
+    process.exit(2);
+  }
+  // RegExp with /g keeps lastIndex between calls; reset before replace().
+  WSD_IMAGE_TAG_RE.lastIndex = 0;
+  const after = before.replace(WSD_IMAGE_TAG_RE, `$1${version}`);
+  if (after !== before) await writeFile(dockerfile, after);
+  console.log(`${dockerfile}: wsd image tag → ${version}`);
 }

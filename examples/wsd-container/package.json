@@ -5,9 +5,6 @@
   "type": "module",
   "description": "Example Worker + Durable Object that uses @cloudflare/workspace inside a Cloudflare Container.",
   "scripts": {
-    "build:wsd": "npm run build:docker --workspace @cloudflare/workspace-wsd",
-    "predev": "npm run build:wsd",
-    "predeploy": "npm run build:wsd",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
