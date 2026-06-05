@@ -8,9 +8,9 @@
 # (git, npm, vitest, …) see the same files the Workspace RPC
 # surface reads and writes.
 
-FROM --platform=linux/amd64 ghcr.io/cloudflare/workspace-wsd-linux-x64:0.1.0-alpha.1 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.3 AS wsd
 
-FROM --platform=linux/amd64 debian:stable-slim
+FROM debian:stable-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
