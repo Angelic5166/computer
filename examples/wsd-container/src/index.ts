@@ -96,19 +96,42 @@ interface ExecRequest {
   encoding?: "utf8";
 }
 
-// wsd mounts the VFS at /workspace inside the container. All file
-// paths in this example are anchored at that mount point so an
-// exec'd `cat /workspace/<x>` sees the same bytes a previous PUT
-// wrote, and so the R2 mount at /workspace/r2 sits next to user
-// writes rather than in some parallel namespace.
+// wsd mounts the VFS at /workspace inside the container. The file
+// handler enforces that every path it touches sits under that
+// root; callers pass the absolute VFS path verbatim in the URL
+// (e.g. PUT /c/<name>/file/workspace/hello.txt writes
+// /workspace/hello.txt, exactly as wsd sees it). Anything outside
+// /workspace is rejected up front — the example only wants to
+// expose the mounted tree, not the container's full filesystem.
 const MOUNT_ROOT = "/workspace";
+
+function resolveMountPath(rest: string): string | null {
+  // URL was matched as /c/<name>/file/<rest>; treat <rest> as an
+  // absolute path with the leading `/` stripped.
+  const candidate = `/${rest}`;
+  if (candidate !== MOUNT_ROOT && !candidate.startsWith(`${MOUNT_ROOT}/`)) {
+    return null;
+  }
+  // Reject .. segments so a caller can't escape the mount through
+  // path traversal once we've validated the prefix.
+  if (candidate.split("/").includes("..")) {
+    return null;
+  }
+  return candidate;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
     const fileMatch = url.pathname.match(/^\/c\/([^/]+)\/file\/(.+)$/);
-    if (fileMatch) return handleFile(request, env, fileMatch[1], `${MOUNT_ROOT}/${fileMatch[2]}`);
+    if (fileMatch) {
+      const resolved = resolveMountPath(fileMatch[2]);
+      if (resolved === null) {
+        return errorJSON(new Error(`path must sit under ${MOUNT_ROOT}; got /${fileMatch[2]}`), 400);
+      }
+      return handleFile(request, env, fileMatch[1], resolved);
+    }
 
     const execMatch = url.pathname.match(/^\/c\/([^/]+)\/exec\/?$/);
     if (execMatch) return handleExec(request, env, execMatch[1]);
@@ -118,9 +141,9 @@ export default {
         [
           "wsd-container example",
           "",
-          "  PUT  /c/<name>/file/<path>     write file",
-          "  GET  /c/<name>/file/<path>     read file",
-          "  POST /c/<name>/exec            run a command (JSON result)",
+          `  PUT  /c/<name>/file/workspace/<path>     write file at ${MOUNT_ROOT}/<path>`,
+          `  GET  /c/<name>/file/workspace/<path>     read file at ${MOUNT_ROOT}/<path>`,
+          "  POST /c/<name>/exec                      run a command (JSON result)",
 
           "",
         ].join("\n"),
@@ -191,10 +214,7 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   const stub = env.ContainerExample.get(env.ContainerExample.idFromName(name));
   const ws = await stub.getWorkspace();
   try {
-    const handle = await ws.shell.exec(command, {
-      cwd: body.cwd ?? MOUNT_ROOT,
-      encoding: "utf8",
-    });
+    const handle = await ws.shell.exec(command, { cwd: body.cwd, encoding: "utf8" });
     const result = await handle.result();
     return new Response(JSON.stringify(result), {
       status: 200,

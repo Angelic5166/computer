@@ -68,14 +68,19 @@ in the Dockerfile).
 
 ## Paths
 
-**All file paths in this example are anchored at `/workspace`.** A
-PUT to `/c/<name>/file/hello.txt` writes `/workspace/hello.txt` in
-the VFS, and an exec'd `cat /workspace/hello.txt` sees the same
-bytes. `exec` requests default `cwd` to `/workspace` so relative
-paths Just Work.
+The file handler takes the URL path verbatim as an absolute VFS
+path and rejects anything outside `/workspace` with `400`. So
+`PUT /c/<name>/file/workspace/hello.txt` writes
+`/workspace/hello.txt`, and `GET /c/<name>/file/workspace/r2/x`
+reads `/workspace/r2/x` — the URL and the on-disk path always
+match. `PUT /c/<name>/file/etc/passwd` would be rejected; the
+example only exposes the mounted tree.
 
-Write outside the mount and exec won't see it: that's by design
-and it's the one thing this example exists to demonstrate.
+`exec` is **not** path-restricted. The command runs as PID 1 of
+the container with no `cwd` default; it can `cat /etc/os-release`,
+touch `/tmp/x`, or anything else the container's userland allows.
+Only writes that land under `/workspace` make their way back to
+the DO via the FUSE mount.
 
 ## R2 mount
 
@@ -100,18 +105,19 @@ npm run seed:r2 --workspace @cloudflare/example-wsd-container
 Then:
 
 ```sh
-curl http://127.0.0.1:8787/c/demo/file/r2/hello.txt
+curl http://127.0.0.1:8787/c/demo/file/workspace/r2/hello.txt
 # => hello world
 ```
 
 ## HTTP surface
 
 ```
-PUT  /c/<name>/file/<path...>   raw body → wsd writeFile at /workspace/<path>
-GET  /c/<name>/file/<path...>   octet-stream of /workspace/<path>
-POST /c/<name>/exec             { command | argv, cwd?, encoding? }
-                                cwd defaults to /workspace
-                                → JSON { exitCode, stdout, stderr }
+PUT  /c/<name>/file/workspace/<path>   raw body → writeFile at /workspace/<path>
+GET  /c/<name>/file/workspace/<path>   octet-stream of /workspace/<path>
+                                       (any path outside /workspace returns 400)
+POST /c/<name>/exec                    { command | argv, cwd?, encoding? }
+                                       no cwd default; container PID 1 inherits /
+                                       → JSON { exitCode, stdout, stderr }
 ```
 
 `<name>` selects a DO instance; each gets its own container.
@@ -131,20 +137,19 @@ Smoke test:
 
 ```sh
 # Trigger the container (first call also boots wsd + the capnweb session).
-curl http://127.0.0.1:8787/c/demo/health
+curl http://127.0.0.1:8787/
 
 # Write a file at /workspace/hello.txt
 echo 'hello' | curl -X PUT --data-binary @- \
-  http://127.0.0.1:8787/c/demo/file/hello.txt
+  http://127.0.0.1:8787/c/demo/file/workspace/hello.txt
 
 # Read it back
-curl http://127.0.0.1:8787/c/demo/file/hello.txt
+curl http://127.0.0.1:8787/c/demo/file/workspace/hello.txt
 
-# Exec a command — cwd defaults to /workspace, so the relative path
-# reads the file the previous PUT wrote.
+# Exec sees the same bytes via the absolute path.
 curl -X POST http://127.0.0.1:8787/c/demo/exec \
   -H 'content-type: application/json' \
-  -d '{"command":"cat hello.txt && uname -a","encoding":"utf8"}'
+  -d '{"command":"cat /workspace/hello.txt && uname -a","encoding":"utf8"}'
 ```
 
 ## Layout
