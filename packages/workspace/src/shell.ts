@@ -32,6 +32,8 @@
 import type { ApplyResult, SkippedEntry } from "@cloudflare/dofs";
 import type { ExecEvent, ShellRPC } from "@cloudflare/workspace-rpc";
 
+import { noopObserver, type WorkspaceObserver, withSpan } from "./observe.js";
+
 export type ExecEncoding = "utf8" | undefined;
 
 // The payload type for stdout/stderr chunks: Uint8Array by
@@ -124,10 +126,12 @@ export interface Sync {
 export class WorkspaceShell {
   readonly #shell: ShellRPC;
   readonly #sync: Sync;
+  readonly #observer: WorkspaceObserver;
 
-  constructor(shell: ShellRPC, sync: Sync) {
+  constructor(shell: ShellRPC, sync: Sync, observer: WorkspaceObserver = noopObserver) {
     this.#shell = shell;
     this.#sync = sync;
+    this.#observer = observer;
   }
 
   exec(command: string): Promise<ExecHandle<undefined>>;
@@ -146,12 +150,25 @@ export class WorkspaceShell {
     } catch {
       // pushed stays 0
     }
-    const envelope = await this.#shell.exec({
-      command,
-      id: options.id,
-      cwd: options.cwd,
-      timeoutMs: options.timeoutMs,
-    });
+    const envelope = await withSpan(
+      this.#observer,
+      "workspace.shell.exec.spawn",
+      {
+        "workspace.shell.cwd": options.cwd,
+        "workspace.shell.timeout_ms": options.timeoutMs,
+        "workspace.shell.id": options.id,
+      },
+      () =>
+        this.#shell.exec({
+          command,
+          id: options.id,
+          cwd: options.cwd,
+          timeoutMs: options.timeoutMs,
+        }),
+      (span, outcome) => {
+        if (outcome.ok) span.setAttribute("workspace.shell.id", outcome.value.id);
+      },
+    );
     // Dispose the result envelope when the event stream finishes
     // draining. Without this, capnweb's exports table holds onto
     // the envelope for the life of the session — one entry per

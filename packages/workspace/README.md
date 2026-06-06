@@ -64,6 +64,63 @@ export default {
 } satisfies ExportedHandler<Env>;
 ```
 
+## Observability
+
+The package emits one span per documented operation through an optional
+observer hook. Pass an observer to the `Workspace` constructor:
+
+```ts
+import { Workspace, type WorkspaceObserver } from "@cloudflare/workspace";
+
+const observer: WorkspaceObserver = {
+  async span(name, attributes, run) {
+    // Wrap `run` however your tracing backend wants. The Cloudflare
+    // runtime, OpenTelemetry, and a plain console.log adapter all fit
+    // the same shape.
+    return run({ setAttribute: () => {} });
+  },
+};
+
+const ws = new Workspace({
+  storage: this.ctx.storage,
+  backends: [...],
+  observer,
+});
+```
+
+The observer's `span(name, attributes, run)` wraps each operation. It
+starts a span, runs the callback, and ends the span when the callback
+returns or its promise settles. Errors thrown by the work record
+`error.name` and `error.message` and propagate.
+
+The span names the package emits today:
+
+- `workspace.connect` — one per `connect()` attempt against a single
+  backend. Tagged with `workspace.backend.id`.
+- `workspace.sync.push` / `workspace.sync.pull` — one per sync call.
+  Tagged with the entry counts (`workspace.sync.pushed`,
+  `workspace.sync.applied`, `workspace.sync.skipped`).
+- `workspace.shell.exec` — the full exec bracket from the
+  `WorkspaceStub`. Contains `workspace.sync.push`,
+  `workspace.shell.exec.spawn`, and `workspace.sync.pull` as nested
+  children. Tagged with `workspace.shell.exit_code`,
+  `workspace.shell.pushed`, `workspace.shell.pulled`, and
+  `workspace.shell.skipped`.
+- `workspace.fs.<op>` — one per filesystem call routed through the
+  stub (`readFile`, `writeFile`, `stat`, `readdir`, `find`, `ls`,
+  `grep`, `mkdir`, `rm`). Tagged with `workspace.fs.path` and, where
+  meaningful, `workspace.fs.entries` or `workspace.fs.matches`.
+
+Attribute values are restricted to `boolean | number | string` so the
+same observer shape works against the Cloudflare runtime's built-in
+`ctx.tracing.enterSpan(...)` API, OpenTelemetry, or a recording test
+observer. Adapter packages for the Cloudflare runtime and for
+OpenTelemetry are forthcoming.
+
+The default is a no-op observer with no allocation or async overhead
+beyond what the callback itself does, so the package has no
+observability cost when callers do not opt in.
+
 ## Stub disposal
 
 capnweb does not garbage-collect remote stubs. On the long-lived

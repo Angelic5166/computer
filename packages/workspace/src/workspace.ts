@@ -23,6 +23,7 @@ import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { MountIndex } from "./mounts/index.js";
 import { buildMountRegistry, type MountValue } from "./mounts/registry.js";
 import type { Mount } from "./mounts/types.js";
+import { noopObserver, type WorkspaceObserver, withSpan } from "./observe.js";
 import { WorkspaceShell } from "./shell.js";
 import { WorkspaceStub } from "./stub.js";
 
@@ -50,6 +51,15 @@ export interface WorkspaceOptions {
   // bare Mount objects or factories that take a MountContext and
   // return one. Factories are called once at construction.
   mounts?: Record<string, MountValue>;
+
+  // Observer that receives one span per workspace operation: a
+  // `workspace.connect` per backend connect attempt, `workspace.sync.push`
+  // / `workspace.sync.pull` per sync call, `workspace.shell.exec` per
+  // exec, and `workspace.fs.<op>` per filesystem call routed through the
+  // stub. The default is a no-op so the package has no observability cost
+  // when callers do not opt in. See `./observe.ts` for the contract and
+  // the adapter subpaths for the Cloudflare runtime and OpenTelemetry.
+  observer?: WorkspaceObserver;
 
   // Bounded retry policy for ready(). When omitted, ready() runs
   // the backend list once and surfaces the first failure — the
@@ -81,6 +91,7 @@ export class Workspace {
   #provider: SQLiteWorkspaceProvider | undefined;
   readonly #backends: WorkspaceBackend[];
   readonly #reconnect: ReconnectOptions;
+  readonly #observer: WorkspaceObserver;
   readonly #now: () => number;
   readonly #mounts: Map<string, Mount>;
   readonly #mountIndex: MountIndex;
@@ -105,6 +116,7 @@ export class Workspace {
     this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
     this.#backends = options.backends.slice();
     this.#reconnect = options.reconnect ?? { attempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
+    this.#observer = options.observer ?? noopObserver;
     this.#mounts = buildMountRegistry(options.mounts, {
       sessionId: options.sessionId,
       vfs: () => this.provider(),
@@ -134,6 +146,14 @@ export class Workspace {
   // sync helpers that take a Database directly.
   get db(): Database {
     return this.#db;
+  }
+
+  // Observer used to wrap workspace operations in spans. Exposed for the
+  // stub and shell facades, which need to wrap their own entry points in
+  // spans named after the boundary the caller crossed. Defaults to a
+  // no-op when the constructor did not receive one.
+  get observer(): WorkspaceObserver {
+    return this.#observer;
   }
 
   // Filesystem facade — the documented Workspace.fs surface from
@@ -241,19 +261,41 @@ export class Workspace {
   // bracket folds `skipped` into its ExecResult so users see what
   // stayed authoritative on the mount.
   push(): Promise<number> {
-    return this.#serialize(async () => {
-      await this.ready();
-      if (!this.#handle) throw new Error("Workspace not connected");
-      return pushOnce(this.#db, this.#handle.rpc.sync);
-    });
+    return this.#serialize(() =>
+      withSpan(
+        this.#observer,
+        "workspace.sync.push",
+        {},
+        async () => {
+          await this.ready();
+          if (!this.#handle) throw new Error("Workspace not connected");
+          return pushOnce(this.#db, this.#handle.rpc.sync);
+        },
+        (span, outcome) => {
+          if (outcome.ok) span.setAttribute("workspace.sync.pushed", outcome.value);
+        },
+      ),
+    );
   }
 
   pull(): Promise<ApplyResult> {
-    return this.#serialize(async () => {
-      await this.ready();
-      if (!this.#handle) throw new Error("Workspace not connected");
-      return pullOnce(this.#db, this.#handle.rpc.sync);
-    });
+    return this.#serialize(() =>
+      withSpan(
+        this.#observer,
+        "workspace.sync.pull",
+        {},
+        async () => {
+          await this.ready();
+          if (!this.#handle) throw new Error("Workspace not connected");
+          return pullOnce(this.#db, this.#handle.rpc.sync);
+        },
+        (span, outcome) => {
+          if (!outcome.ok) return;
+          span.setAttribute("workspace.sync.applied", outcome.value.applied);
+          span.setAttribute("workspace.sync.skipped", outcome.value.skipped.length);
+        },
+      ),
+    );
   }
 
   // Tail-promise FIFO. Each call chains onto the existing tail so
@@ -308,7 +350,12 @@ export class Workspace {
     const errors: Array<{ id: string; error: unknown }> = [];
     for (const backend of this.#backends) {
       try {
-        const handle = await backend.connect();
+        const handle = await withSpan(
+          this.#observer,
+          "workspace.connect",
+          { "workspace.backend.id": backend.id },
+          () => backend.connect(),
+        );
         // Reconcile watermarks before publishing the handle. If the
         // remote restarted between our pushes / fetches it has lost
         // state we thought it had; reset the local cursors so the
@@ -319,7 +366,7 @@ export class Workspace {
         this.#handle = handle;
         // Workspace satisfies the Sync interface in shell.ts via
         // its public push() / pull() methods.
-        this.#shell = new WorkspaceShell(handle.rpc.shell, this);
+        this.#shell = new WorkspaceShell(handle.rpc.shell, this, this.#observer);
         // Tear down our caches if the transport drops mid-session.
         // Backends without a `closed` promise (in-process fakes) opt
         // out by omitting it; we only react when it's wired.

@@ -57,6 +57,7 @@ import type {
 import { trackStub, untrackStub } from "@cloudflare/workspace-rpc/debug";
 import { RpcTarget } from "capnweb";
 
+import { withSpan } from "./observe.js";
 import type { ExecResult } from "./shell.js";
 import type { Workspace } from "./workspace.js";
 
@@ -105,27 +106,63 @@ export class WorkspaceFilesystemStub extends RpcTarget {
     path: string,
     optionsOrEncoding?: "utf8" | ReadFileOptions,
   ): Promise<string | ReadableStream<Uint8Array>> {
-    return this.#ws.fs.readFile(path, optionsOrEncoding as ReadFileOptions);
+    return withSpan(this.#ws.observer, "workspace.fs.readFile", { "workspace.fs.path": path }, () =>
+      this.#ws.fs.readFile(path, optionsOrEncoding as ReadFileOptions),
+    );
   }
 
   stat(path: string): Promise<WorkspaceStatResult> {
-    return this.#ws.fs.stat(path);
+    return withSpan(this.#ws.observer, "workspace.fs.stat", { "workspace.fs.path": path }, () =>
+      this.#ws.fs.stat(path),
+    );
   }
 
   readdir(path: string): Promise<WorkspaceDirentResult[]> {
-    return this.#ws.fs.readdir(path);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.readdir",
+      { "workspace.fs.path": path },
+      () => this.#ws.fs.readdir(path),
+      (span, outcome) => {
+        if (outcome.ok) span.setAttribute("workspace.fs.entries", outcome.value.length);
+      },
+    );
   }
 
   find(directory: string, pattern?: string): Promise<WorkspaceFoundEntry[]> {
-    return this.#ws.fs.find(directory, pattern);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.find",
+      { "workspace.fs.path": directory, "workspace.fs.pattern": pattern },
+      () => this.#ws.fs.find(directory, pattern),
+      (span, outcome) => {
+        if (outcome.ok) span.setAttribute("workspace.fs.matches", outcome.value.length);
+      },
+    );
   }
 
   ls(prefix: string): Promise<string[]> {
-    return this.#ws.fs.ls(prefix);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.ls",
+      { "workspace.fs.path": prefix },
+      () => this.#ws.fs.ls(prefix),
+      (span, outcome) => {
+        if (outcome.ok) span.setAttribute("workspace.fs.entries", outcome.value.length);
+      },
+    );
   }
 
   grep(pattern: string, path: string, options: GrepOptions = {}): Promise<WorkspaceGrepMatch[]> {
-    return this.#ws.fs.grep(pattern, path, options);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.grep",
+      { "workspace.fs.path": path, "workspace.fs.pattern": pattern },
+      () => this.#ws.fs.grep(pattern, path, options),
+      (span, outcome) => {
+        if (outcome.ok) span.setAttribute("workspace.fs.matches", outcome.value.length);
+      },
+    );
   }
 
   // --- Mutations ---------------------------------------------------
@@ -135,15 +172,34 @@ export class WorkspaceFilesystemStub extends RpcTarget {
     content: WriteFileContent,
     options: WriteFileOptions = {},
   ): Promise<void> {
-    return this.#ws.fs.writeFile(path, content, options);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.writeFile",
+      { "workspace.fs.path": path },
+      () => this.#ws.fs.writeFile(path, content, options),
+    );
   }
 
   mkdir(path: string, options: MkdirOptions = {}): Promise<void> {
-    return this.#ws.fs.mkdir(path, options);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.mkdir",
+      { "workspace.fs.path": path, "workspace.fs.recursive": options.recursive },
+      () => this.#ws.fs.mkdir(path, options),
+    );
   }
 
   rm(path: string, options: RmOptions = {}): Promise<void> {
-    return this.#ws.fs.rm(path, options);
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.rm",
+      {
+        "workspace.fs.path": path,
+        "workspace.fs.recursive": options.recursive,
+        "workspace.fs.force": options.force,
+      },
+      () => this.#ws.fs.rm(path, options),
+    );
   }
 }
 
@@ -214,12 +270,29 @@ export class WorkspaceShellStub extends RpcTarget {
     // (the one that built this stub) already has the spawn in
     // flight. result() awaits the handle's own result() when the
     // caller asks.
-    const pending: Promise<ExecResult<"utf8" | undefined>> =
-      options.encoding === "utf8"
-        ? this.#ws.shell
-            .exec(command, { cwd: options.cwd, encoding: "utf8" })
-            .then((handle) => handle.result())
-        : this.#ws.shell.exec(command, { cwd: options.cwd }).then((handle) => handle.result());
+    //
+    // The whole bracket runs inside one `workspace.shell.exec` span
+    // so the pre-exec push, the spawn, and the post-drain pull nest
+    // underneath it on the observer's active context. Errors from
+    // either side land on this span.
+    const pending: Promise<ExecResult<"utf8" | undefined>> = withSpan(
+      this.#ws.observer,
+      "workspace.shell.exec",
+      { "workspace.shell.cwd": options.cwd, "workspace.shell.encoding": options.encoding },
+      () =>
+        options.encoding === "utf8"
+          ? this.#ws.shell
+              .exec(command, { cwd: options.cwd, encoding: "utf8" })
+              .then((handle) => handle.result())
+          : this.#ws.shell.exec(command, { cwd: options.cwd }).then((handle) => handle.result()),
+      (span, outcome) => {
+        if (!outcome.ok) return;
+        span.setAttribute("workspace.shell.exit_code", outcome.value.exitCode);
+        span.setAttribute("workspace.shell.pushed", outcome.value.pushed);
+        span.setAttribute("workspace.shell.pulled", outcome.value.pulled);
+        span.setAttribute("workspace.shell.skipped", outcome.value.skipped.length);
+      },
+    );
     return new WorkspaceExecHandleStub<"utf8" | undefined>(pending);
   }
 }

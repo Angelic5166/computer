@@ -34,6 +34,13 @@ export type {
   MountFactory,
   MountWriteAPI,
 } from "./mounts/types.js";
+export {
+  noopObserver,
+  type WorkspaceAttributes,
+  type WorkspaceAttributeValue,
+  type WorkspaceObserver,
+  type WorkspaceSpan,
+} from "./observe.js";
 export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";
 export type {
   ExecEncoding,
