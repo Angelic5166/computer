@@ -49,5 +49,16 @@
       "tag": "v1",
       "new_sqlite_classes": ["ContainerExample"]
     }
-  ]
+  ],
+
+  // Turn on the Workers Observability tracing surface. With this set,
+  // the runtime traces fetch handlers, binding calls, and any user
+  // spans opened via `ctx.tracing.enterSpan` or the workspace's
+  // Cloudflare observer adapter. Spans appear in the dashboard under
+  // Workers → Observability → Traces.
+  "observability": {
+    "traces": {
+      "enabled": true
+    }
+  }
 }

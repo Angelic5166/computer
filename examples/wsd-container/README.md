@@ -122,6 +122,23 @@ POST /c/<name>/exec                    { command | argv, cwd?, encoding? }
 
 `<name>` selects a DO instance; each gets its own container.
 
+## Tracing
+
+The Worker enables Cloudflare's built-in tracing in
+`wrangler.jsonc` (`observability.traces.enabled = true`) and wires
+the workspace observer to `ctx.tracing` via the
+`@cloudflare/workspace/observe/cloudflare` adapter. Every workspace
+operation (`workspace.connect`, `workspace.sync.push`,
+`workspace.sync.pull`, `workspace.shell.exec`, and the
+`workspace.fs.*` family) opens a span on the runtime, so the
+dashboard under Workers → Observability → Traces shows them
+nested under the automatic fetch and Durable Object spans.
+
+Exporting the traces to a third-party OpenTelemetry collector
+(Honeycomb, Grafana Cloud, Axiom, etc.) is configured at the
+account level in the Cloudflare dashboard; no code change is
+required in this example.
+
 ## Run it locally
 
 Requires Docker. The Dockerfile pulls

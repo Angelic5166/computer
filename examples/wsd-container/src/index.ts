@@ -17,7 +17,7 @@
 //              │  ws://workspace.internal/ws    │
 //              └─── capnweb session ◀─────────────┘
 
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, tracing } from "cloudflare:workers";
 
 import {
   CloudflareContainerBackend,
@@ -28,6 +28,7 @@ import {
   type WorkspaceStub,
   withWorkspaceContainer,
 } from "@cloudflare/workspace";
+import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
 
 // Re-export so the runtime can build a loopback binding for the
 // container egress (ctx.exports.WorkspaceProxy below). The class
@@ -64,6 +65,14 @@ export class ContainerExample extends withWorkspaceContainer(class extends Durab
       mounts: {
         "/workspace/r2": R2Bucket(env.Bucket),
       },
+      // Route every workspace operation through the Cloudflare
+      // runtime's user-tracing surface. The runtime owns the span
+      // lifecycle; the observer is a thin facade that forwards seed
+      // attributes and a `setAttribute` callback. With
+      // `observability.traces.enabled = true` in wrangler.jsonc, the
+      // spans show up in the Workers Observability dashboard
+      // alongside the runtime's automatic fetch and binding spans.
+      observer: createCloudflareObserver({ tracing }),
     });
   }
 
