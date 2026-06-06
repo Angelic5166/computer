@@ -59,12 +59,12 @@ function fakeRpc(): import("@cloudflare/workspace-rpc").SyncRPC {
       } finally {
         reader.releaseLock();
       }
-      return { rev: 0, appliedPushRev: input.senderRev };
+      return { rev: 0, appliedPushCursor: { rev: input.senderRev, path: null } };
     },
     async fetchChanges() {
       return {
-        currentRev: 0,
-        appliedPushRev: 0,
+        currentCursor: { rev: 0, path: null },
+        appliedPushCursor: { rev: 0, path: null },
         stream: new ReadableStream<import("@cloudflare/dofs").ChangeEntry>({
           start(c) {
             c.close();
@@ -100,7 +100,7 @@ function fakeRpc(): import("@cloudflare/workspace-rpc").SyncRPC {
       });
     },
     async watermarks() {
-      return { currentRev: 0, pushRev: 0, fetchRev: 0 };
+      return { currentRev: 0, pushRev: 0, fetchCursor: { rev: 0, path: null } };
     },
     async pushObjects(objects) {
       const reader = objects.getReader();
@@ -513,7 +513,7 @@ describe("Workspace backend selection", () => {
       ...fakeRpc(),
       async watermarks() {
         watermarksCalls++;
-        return { currentRev: 0, pushRev: 0, fetchRev: 0 };
+        return { currentRev: 0, pushRev: 0, fetchCursor: { rev: 0, path: null } };
       },
     };
     const storage = makeStorage();
@@ -691,7 +691,7 @@ describe("Workspace mutation serialization", () => {
           reader.releaseLock();
         }
         inFlight.push--;
-        return { rev: 0, appliedPushRev: input.senderRev };
+        return { rev: 0, appliedPushCursor: { rev: input.senderRev, path: null } };
       },
     };
 
@@ -734,7 +734,7 @@ describe("Workspace mutation serialization", () => {
         } finally {
           reader.releaseLock();
         }
-        return { rev: 0, appliedPushRev: input.senderRev };
+        return { rev: 0, appliedPushCursor: { rev: input.senderRev, path: null } };
       },
     };
     const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("fake", rpc)] });
