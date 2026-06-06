@@ -25,6 +25,7 @@ export default defineConfig({
   input: {
     index: "src/index.ts",
     git: "src/git/index.ts",
+    "observe/cloudflare": "src/observe/cloudflare.ts",
   },
   external: [
     "cloudflare:workers",

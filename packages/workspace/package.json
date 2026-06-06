@@ -18,6 +18,10 @@
     "./git": {
       "types": "./dist/git.d.ts",
       "import": "./dist/git.js"
+    },
+    "./observe/cloudflare": {
+      "types": "./dist/observe/cloudflare.d.ts",
+      "import": "./dist/observe/cloudflare.js"
     }
   },
   "main": "./dist/index.js",
