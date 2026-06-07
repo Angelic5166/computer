@@ -266,6 +266,16 @@ export class WorkspaceShellStub extends RpcTarget {
     command: string,
     options: WorkspaceExecOptions = {},
   ): Promise<WorkspaceExecHandleStub<"utf8" | undefined>> {
+    // Heal a torn-down session before reaching for the shell. The
+    // backend's `closed` listener (see workspace.ts) clears #handle,
+    // #shell, and #readyPromise on a mid-session transport drop, so
+    // a bare `this.#ws.shell` would throw "Workspace not connected"
+    // until a caller manually called ready() again. ready() is
+    // idempotent on a live handle and re-enters connect() on a dead
+    // one, so a stale container is detected and replaced
+    // transparently here.
+    await this.#ws.ready();
+
     // Kick off the exec eagerly so the caller's first round trip
     // (the one that built this stub) already has the spawn in
     // flight. result() awaits the handle's own result() when the

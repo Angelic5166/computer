@@ -267,9 +267,8 @@ export class Workspace {
         "workspace.sync.push",
         {},
         async () => {
-          await this.ready();
-          if (!this.#handle) throw new Error("Workspace not connected");
-          return pushOnce(this.#db, this.#handle.rpc.sync);
+          const handle = await this.#readyHandle();
+          return pushOnce(this.#db, handle.rpc.sync);
         },
         (span, outcome) => {
           if (outcome.ok) span.setAttribute("workspace.sync.pushed", outcome.value);
@@ -285,9 +284,8 @@ export class Workspace {
         "workspace.sync.pull",
         {},
         async () => {
-          await this.ready();
-          if (!this.#handle) throw new Error("Workspace not connected");
-          return pullOnce(this.#db, this.#handle.rpc.sync);
+          const handle = await this.#readyHandle();
+          return pullOnce(this.#db, handle.rpc.sync);
         },
         (span, outcome) => {
           if (!outcome.ok) return;
@@ -296,6 +294,23 @@ export class Workspace {
         },
       ),
     );
+  }
+
+  // Resolve a live BackendHandle, healing a torn-down session if the
+  // transport dropped between an earlier ready() and now. ready() is
+  // idempotent on a live handle; the second pass only runs when the
+  // `closed` listener wiped #handle / #readyPromise out from under us
+  // after the first call resolved. Surfacing the original "not
+  // connected" error after a second failed pass keeps the caller's
+  // failure mode unchanged when the backend genuinely can't reach a
+  // peer.
+  async #readyHandle(): Promise<BackendHandle> {
+    await this.ready();
+    if (!this.#handle) {
+      await this.ready();
+    }
+    if (!this.#handle) throw new Error("Workspace not connected");
+    return this.#handle;
   }
 
   // Tail-promise FIFO. Each call chains onto the existing tail so

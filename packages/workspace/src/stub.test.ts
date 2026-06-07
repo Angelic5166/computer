@@ -144,6 +144,80 @@ describe("WorkspaceStub", () => {
     });
   });
 
+  it("shell.exec auto-reconnects after the backend signals closed", async () => {
+    // Reproduces the "Workspace not connected — await ready() first" bug:
+    // when the underlying transport drops mid-session, the Workspace
+    // clears its cached shell. A subsequent stub.shell.exec call would
+    // hit the synchronous getter on a torn-down Workspace and throw
+    // instead of rebuilding the connection. The stub must await
+    // ready() first so a drop is healed transparently.
+    let signalClosed!: () => void;
+    let connectCount = 0;
+    let execCalls = 0;
+    const shellRpc: import("@cloudflare/workspace-rpc").ShellRPC = {
+      async exec() {
+        execCalls += 1;
+        return {
+          id: `e-${execCalls}`,
+          events: new ReadableStream({
+            start(c) {
+              c.enqueue({ id: `e-${execCalls}`, seq: 1, name: "exit", value: 0 });
+              c.close();
+            },
+          }),
+        };
+      },
+      getExec: () => Promise.reject(new Error("not used")),
+      killExec: () => Promise.reject(new Error("not used")),
+      disposeExec: () => Promise.reject(new Error("not used")),
+    };
+    const reconnectBackend: WorkspaceBackend = {
+      id: "reconnect",
+      async connect(): Promise<BackendHandle> {
+        connectCount += 1;
+        // First connect arms a controllable `closed` promise; later
+        // connects don't need one for this test.
+        const closed =
+          connectCount === 1
+            ? new Promise<void>((resolve) => {
+                signalClosed = resolve;
+              })
+            : undefined;
+        return {
+          rpc: composite(fakeSync(), shellRpc),
+          closed,
+          close: async () => {},
+        };
+      },
+    };
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      backends: [reconnectBackend],
+    });
+    try {
+      await ws.ready();
+      expect(connectCount).toBe(1);
+      const stub = ws.stub();
+
+      // Simulate a mid-session transport drop. The Workspace's
+      // `closed` listener clears #handle / #shell / #readyPromise
+      // in a microtask, so yield once before exercising the stub.
+      signalClosed();
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Before the fix, this throws "Workspace not connected".
+      // After the fix, the stub awaits ready() and gets a fresh
+      // backend handle.
+      const handle = await stub.shell.exec("noop");
+      const res = await handle.result();
+      expect(res.exitCode).toBe(0);
+      expect(connectCount).toBe(2);
+      expect(execCalls).toBe(1);
+    } finally {
+      await ws.close();
+    }
+  });
+
   it("shell.exec returns an eagerly-spawned handle", async () => {
     // The stub's exec() kicks off the underlying workspace.shell.exec
     // before returning, so the caller's first round trip already has

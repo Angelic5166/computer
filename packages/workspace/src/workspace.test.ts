@@ -240,6 +240,43 @@ describe("Workspace backend fallback", () => {
     expect(connectCount).toBe(2);
   });
 
+  it("push() rebuilds after the backend signals closed", async () => {
+    // After a transport drop the Workspace clears #handle, #shell,
+    // and #readyPromise. The next push() call must re-enter
+    // connect() through ready() and ship against the fresh handle
+    // rather than throwing "Workspace not connected".
+    let signalClosed!: () => void;
+    let connectCount = 0;
+    const backend: WorkspaceBackend = {
+      id: "reconnect",
+      async connect(): Promise<BackendHandle> {
+        connectCount += 1;
+        const closed =
+          connectCount === 1
+            ? new Promise<void>((resolve) => {
+                signalClosed = resolve;
+              })
+            : undefined;
+        return {
+          rpc: composite(fakeRpc()),
+          closed,
+          close: async () => {},
+        };
+      },
+    };
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+    await ws.ready();
+    expect(connectCount).toBe(1);
+
+    signalClosed();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Should rebuild silently and resolve to a push count, not throw.
+    const pushed = await ws.push();
+    expect(pushed).toBeGreaterThanOrEqual(0);
+    expect(connectCount).toBe(2);
+  });
+
   it("reconciles watermarks on connect when the remote is behind", async () => {
     // Seed local watermarks so they look like they have already
     // shipped data to / pulled data from a previous container. The
