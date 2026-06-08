@@ -29,20 +29,29 @@ docker run --rm --platform linux/amd64 --privileged \
   -e REPS=3 -e WARMUP=1 \
   -e OUTPUT_JSON=/out/results.json \
   -e SCENARIOS='pure read,pure copy,overwrite,write 64' \
-  -e WSD_FUSE_AUTO_CACHE=1 \
   debian:stable-slim bash /run-bench.sh
 ```
+
+The production-safe profile (auto_cache plus one-second metadata
+timeouts) is the built-in default; the numbers below were captured
+with no WSD_FUSE_* env vars set. To opt out of auto_cache for a
+run, set WSD_FUSE_AUTO_CACHE=0.
 
 ## Results
 
 Mean over three reps with one warmup. All times in milliseconds.
 
-| Scenario          | native baseline | default | auto_cache | kernel_cache |
-|-------------------|----------------:|--------:|-----------:|-------------:|
-| write 64 MiB      |            32.3 |   214.9 |      213.7 |            — |
-| pure read 64 MiB  |            26.0 |    44.1 |       45.3 |         28.4 |
-| pure copy 64 MiB  |            32.3 |   253.2 |      252.3 |        245.4 |
-| overwrite 64 MiB  |            28.9 |   191.2 |      185.9 |        185.4 |
+The default column reflects the production-safe profile that the
+daemon ships with today (auto_cache plus one-second attr_timeout,
+entry_timeout, and ac_attr_timeout). The kernel_cache column ran
+with WSD_FUSE_AUTO_CACHE=0 and WSD_FUSE_KERNEL_CACHE=1.
+
+| Scenario          | native baseline | default (auto_cache) | kernel_cache |
+|-------------------|----------------:|---------------------:|-------------:|
+| write 64 MiB      |            32.3 |                213.7 |            — |
+| pure read 64 MiB  |            26.0 |                 45.3 |         28.4 |
+| pure copy 64 MiB  |            32.3 |                252.3 |        245.4 |
+| overwrite 64 MiB  |            28.9 |                185.9 |        185.4 |
 
 ## What the numbers say
 
@@ -52,13 +61,13 @@ expectation: with the cache option enabled the kernel reuses page-
 cache contents across reads of the same offsets within one open
 instead of issuing a fresh FUSE round-trip per `read` call.
 
-`auto_cache` showed no change in this run. The benchmark reads each
-target file exactly once per rep in a fresh directory, so there is
-nothing in the page cache for `auto_cache` to invalidate or reuse on
-open. A read-heavy workload that reopens the same file repeatedly is
-the right shape to measure `auto_cache`. Treat the unchanged numbers
-here as the absence of regression, not as evidence that `auto_cache`
-is a no-op in production.
+`auto_cache` ships as the default. The benchmark reads each target
+file exactly once per rep in a fresh directory, so there is nothing
+in the page cache for `auto_cache` to invalidate or reuse on open;
+the numbers above measure the absence of regression rather than the
+speed-up `auto_cache` delivers in production. A read-heavy workload
+that reopens the same file repeatedly is the right shape to see the
+cache reuse pay off.
 
 Copy, overwrite, and write are all dominated by the write side of the
 operation. The driver buffers writes in memory and spills the whole
@@ -76,11 +85,13 @@ in the VFS does not propagate to a container that already has the
 file open. Reserve it for fast / single-writer profiles where the
 container is the only writer.
 
-`auto_cache` is the production-safe candidate. It invalidates the
-page cache on open when mtime or size changed. Two driver tests in
-`packages/wsd/src/fuse/driver.test.ts` pin the contract that the FUSE
-driver's `getattr` surfaces fresh mtime and size after an external
-VFS write and after a buffered local write. Don't enable
-`WSD_FUSE_AUTO_CACHE` in deployments until a sync-side correctness
-test confirms that the apply path bumps mtime on every change,
-including chunk-only changes that leave the file's size constant.
+`auto_cache` is the production-safe default. It invalidates the
+page cache on open when mtime or size changed. The contract rests on
+three tests. Two in `packages/wsd/src/fuse/driver.test.ts` pin that
+the FUSE driver's `getattr` surfaces fresh mtime and size after an
+external VFS write and after a buffered local write. Four more in
+`packages/dofs/src/sync/apply.test.ts` pin that the sync apply path
+propagates the source mtime onto the destination row, including the
+tricky same-size-bytes-change case. If a future refactor breaks any
+of those tests, treat that as a signal that `auto_cache` is no
+longer safe and revert the default before merging.

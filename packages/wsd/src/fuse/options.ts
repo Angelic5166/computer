@@ -7,8 +7,21 @@
 // test, and gives operators a documented set of env vars to flip when
 // experimenting.
 //
-// The defaults match the historical behavior: big_writes plus 128 KiB
-// max_read and max_write. Every other option is opt-in.
+// The defaults are the production-safe profile derived from the
+// benchmark report and the mtime-propagation contract tests on the
+// apply path. auto_cache is on; the kernel keeps the page cache
+// across reads until the file is reopened with a different mtime or
+// size. attr_timeout, entry_timeout, and ac_attr_timeout sit at one
+// second so stat-heavy tools (find, ls -l, git status) skip repeated
+// FUSE round-trips. negative_timeout stays at zero so a just-written
+// file shows up immediately to a process that probed before it
+// existed. big_writes plus 128 KiB max_read and max_write match the
+// historical sizing; experiments with larger values didn't move the
+// numbers.
+//
+// Every default is opt-out via the matching WSD_FUSE_* env var.
+// Setting an option to "0", "false", "no", "off", or "" turns it
+// off; a positive value overrides the default.
 //
 // Disallowed options (writeback_cache) are stripped defensively because
 // libfuse 2.9 fails the whole mount with "unknown option" when it sees
@@ -16,6 +29,11 @@
 
 const DEFAULT_MAX_READ = 131072;
 const DEFAULT_MAX_WRITE = 131072;
+const DEFAULT_AUTO_CACHE = true;
+const DEFAULT_ATTR_TIMEOUT = "1";
+const DEFAULT_ENTRY_TIMEOUT = "1";
+const DEFAULT_AC_ATTR_TIMEOUT = "1";
+const DEFAULT_NEGATIVE_TIMEOUT = "0";
 
 // libfuse 2.9 does not understand these. Reject them at assembly time
 // so a typo in EXTRA_OPTS doesn't fail the mount on startup.
@@ -53,18 +71,18 @@ export function buildFuseOptionString(env: FuseOptionEnv): string {
   // invalidates. The driver could warn here, but the option string
   // itself is the durable artifact operators inspect when chasing
   // misconfiguration, so just emit the safer one and move on.
-  const autoCache = parseBool(env.WSD_FUSE_AUTO_CACHE);
-  const kernelCache = parseBool(env.WSD_FUSE_KERNEL_CACHE);
+  const autoCache = parseBoolWithDefault(env.WSD_FUSE_AUTO_CACHE, DEFAULT_AUTO_CACHE);
+  const kernelCache = parseBoolWithDefault(env.WSD_FUSE_KERNEL_CACHE, false);
   if (autoCache) {
     opts.push("auto_cache");
   } else if (kernelCache) {
     opts.push("kernel_cache");
   }
 
-  pushTimeout(opts, "attr_timeout", env.WSD_FUSE_ATTR_TIMEOUT);
-  pushTimeout(opts, "entry_timeout", env.WSD_FUSE_ENTRY_TIMEOUT);
-  pushTimeout(opts, "negative_timeout", env.WSD_FUSE_NEGATIVE_TIMEOUT);
-  pushTimeout(opts, "ac_attr_timeout", env.WSD_FUSE_AC_ATTR_TIMEOUT);
+  pushTimeout(opts, "attr_timeout", env.WSD_FUSE_ATTR_TIMEOUT, DEFAULT_ATTR_TIMEOUT);
+  pushTimeout(opts, "entry_timeout", env.WSD_FUSE_ENTRY_TIMEOUT, DEFAULT_ENTRY_TIMEOUT);
+  pushTimeout(opts, "negative_timeout", env.WSD_FUSE_NEGATIVE_TIMEOUT, DEFAULT_NEGATIVE_TIMEOUT);
+  pushTimeout(opts, "ac_attr_timeout", env.WSD_FUSE_AC_ATTR_TIMEOUT, DEFAULT_AC_ATTR_TIMEOUT);
 
   const extra = env.WSD_FUSE_EXTRA_OPTS;
   if (extra !== undefined && extra !== "") {
@@ -94,18 +112,33 @@ function parseNonNegativeNumber(value: string | undefined): number | undefined {
   return n;
 }
 
-function parseBool(value: string | undefined): boolean {
-  if (value === undefined) return false;
+// Resolves an env var to a boolean with a documented default. Unset
+// (undefined) returns the default; an explicit "0" / "false" / "no" /
+// "off" / "" turns the option off; anything else turns it on. The
+// asymmetry between unset and empty matters: an operator who shells
+// out `WSD_FUSE_AUTO_CACHE=` expects to disable the option, and that
+// reaches this function as the empty string.
+function parseBoolWithDefault(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
   const v = value.toLowerCase();
-  return v === "1" || v === "true" || v === "yes" || v === "on";
+  if (v === "" || v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return true;
 }
 
-function pushTimeout(opts: string[], name: string, raw: string | undefined): void {
-  const n = parseNonNegativeNumber(raw);
+function pushTimeout(
+  opts: string[],
+  name: string,
+  raw: string | undefined,
+  fallback?: string,
+): void {
+  // Distinguish unset (use the default) from explicit empty (turn the
+  // option off). Unset is undefined here; explicit empty is "".
+  const effective = raw === undefined ? fallback : raw === "" ? undefined : raw;
+  const n = parseNonNegativeNumber(effective);
   if (n === undefined) return;
   // libfuse accepts integers and fractional seconds. Preserve the
   // operator's literal where it parses cleanly so "0.5" stays as
   // "0.5" rather than dropping precision through Number formatting.
-  const formatted = raw !== undefined && Number(raw) === n ? raw : String(n);
+  const formatted = effective !== undefined && Number(effective) === n ? effective : String(n);
   opts.push(`${name}=${formatted}`);
 }
