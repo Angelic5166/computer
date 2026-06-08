@@ -1,5 +1,7 @@
+import { writeFileSync } from "node:fs";
 import { posix } from "node:path";
 import type { FUSEBackend } from "./backend.js";
+import { createFuseTracer, type FuseTracer, wrapFuseOpsWithTracer } from "./tracer.js";
 import type { NodeVirtualFileSystem } from "./vfs.js";
 
 const ERRNO = {
@@ -549,10 +551,46 @@ export async function mountFuse(options: {
   // biome-ignore lint/suspicious/noExplicitAny: fuse-native ships no types
   const fuseModule: any = await import("fuse-native");
   const Fuse = fuseModule.default ?? fuseModule;
-  const fuse = new Fuse(options.mountPoint, makeFUSEOps(options.vfs, options.mountPoint), {
+  // Optional op tracing. `WSD_FUSE_TRACE=summary` records per-op call
+  // counts and timings; the summary is emitted on SIGUSR2 and on
+  // unmount, to stderr by default or to `WSD_FUSE_TRACE_FILE` when set.
+  // Disabled means zero wrapping overhead — the unwrapped ops object
+  // is handed to fuse-native directly.
+  const traceMode = process.env.WSD_FUSE_TRACE;
+  const tracer: FuseTracer | undefined = traceMode === "summary" ? createFuseTracer() : undefined;
+  const baseOps = makeFUSEOps(options.vfs, options.mountPoint);
+  const ops: FuseOps =
+    tracer === undefined
+      ? baseOps
+      : (wrapFuseOpsWithTracer(
+          baseOps as unknown as Record<string, unknown>,
+          tracer,
+        ) as unknown as FuseOps);
+  const fuse = new Fuse(options.mountPoint, ops, {
     autoUnmount: true,
     debug: false,
   }) as FuseNativeInstance;
+
+  const emitTrace = (reason: string): void => {
+    if (tracer === undefined) return;
+    const json = tracer.formatJson();
+    const target = process.env.WSD_FUSE_TRACE_FILE;
+    if (target !== undefined && target !== "") {
+      try {
+        writeFileSync(target, `${json}\n`);
+      } catch (error) {
+        process.stderr.write(
+          `wsd: failed to write FUSE trace to ${target} (${reason}): ${String(error)}\n${json}\n`,
+        );
+      }
+      return;
+    }
+    process.stderr.write(`wsd: FUSE trace (${reason})\n${json}\n`);
+  };
+
+  if (tracer !== undefined) {
+    process.on("SIGUSR2", () => emitTrace("SIGUSR2"));
+  }
 
   // fuse-native (libfuse 2.9) doesn't expose big_writes/max_write/max_read
   // through opts, so monkey-patch _fuseOptions() to append them. big_writes
@@ -587,6 +625,7 @@ export async function mountFuse(options: {
             return;
           }
 
+          emitTrace("unmount");
           resolve();
         });
       });
