@@ -451,3 +451,74 @@ test("FUSE ops reject a relative mountPoint", async () => {
   const { vfs } = await createNodeVirtualFileSystem();
   expect(() => makeFUSEOps(vfs, "workspace")).toThrow(/absolute/);
 });
+
+test("FUSE getattr reflects mtime and size after an external VFS write", async () => {
+  // The auto_cache FUSE option asks the kernel to invalidate its
+  // page cache for a file when the file's mtime or size changes
+  // between opens. That is the lever for the sync-on-the-host
+  // workflow: a remote push lands new bytes in the VFS, the
+  // container reopens the file, the kernel notices the metadata
+  // change and re-reads instead of serving stale page-cache
+  // bytes. The contract the kernel relies on is that the FUSE
+  // driver's getattr surfaces the new mtime and size promptly.
+  // This test pins that contract so a future driver change
+  // doesn't quietly mask the metadata signal and break the
+  // safety story for auto_cache.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  vfs.writeFileSync("/sync.txt", Buffer.from("first"));
+  const initial = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/sync.txt", cb),
+  );
+  expect(initial.errno).toBe(0);
+  const initialStat = initial.result as { size: number; mtime: Date };
+  expect(initialStat.size).toBe(5);
+
+  // Simulate a sync-side mutation: bytes change, length changes,
+  // and (because the VFS uses a clock-driven mtime) mtime
+  // changes. Wait one millisecond so the clock has room to tick;
+  // a same-tick rewrite is unlikely from the sync path but the
+  // test wants to assert the steady-state contract, not race.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  vfs.writeFileSync("/sync.txt", Buffer.from("second payload"));
+
+  const after = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/sync.txt", cb),
+  );
+  expect(after.errno).toBe(0);
+  const afterStat = after.result as { size: number; mtime: Date };
+  expect(afterStat.size).toBe(14);
+  expect(afterStat.mtime.getTime()).toBeGreaterThan(initialStat.mtime.getTime());
+});
+
+test("FUSE buffered writes still surface a fresh size through getattr", async () => {
+  // Companion to the auto_cache test above. With auto_cache the
+  // kernel only invalidates when mtime or size changes; if the
+  // driver's in-memory buffer were to mask a size growth from
+  // getattr (returning the on-VFS zero instead of the buffered
+  // length), the kernel would keep serving stale page-cache
+  // bytes after a local write. Lock the buffered-getattr
+  // behavior so a future buffer refactor can't regress it.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/buf.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+  const fh = create.result as number;
+  const payload = Buffer.from("buffered");
+  await status((cb: (value: number) => void) =>
+    ops.write("/buf.txt", fh, payload, payload.byteLength, 0, cb),
+  );
+
+  // Buffered, not yet flushed: VFS still sees size 0; FUSE
+  // getattr must report the buffered size so the kernel
+  // page-cache logic sees the change.
+  expect(vfs.statSync("/buf.txt").size).toBe(0);
+  const stat = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/buf.txt", cb),
+  );
+  expect((stat.result as { size: number }).size).toBe(payload.byteLength);
+});

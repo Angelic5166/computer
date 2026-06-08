@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { posix } from "node:path";
 import type { FUSEBackend } from "./backend.js";
+import { buildFuseOptionString } from "./options.js";
 import { createFuseTracer, type FuseTracer, wrapFuseOpsWithTracer } from "./tracer.js";
 import type { NodeVirtualFileSystem } from "./vfs.js";
 
@@ -600,11 +601,13 @@ export async function mountFuse(options: {
   // through opts, so monkey-patch _fuseOptions() to append them. big_writes
   // lets the kernel batch up to max_write bytes per FUSE op instead of the
   // default 4 KiB, cutting per-op round-trips ~32x on large sequential I/O.
+  // buildFuseOptionString reads WSD_FUSE_* env vars; with none set it
+  // emits the historical "big_writes,max_write=131072,max_read=131072".
   const origFuseOptions = fuse._fuseOptions.bind(fuse);
+  const extraOpts = buildFuseOptionString(process.env);
   fuse._fuseOptions = (): string => {
     const base = origFuseOptions();
-    const extra = "big_writes,max_write=131072,max_read=131072";
-    return base ? `${base},${extra}` : `-o${extra}`;
+    return base ? `${base},${extraOpts}` : `-o${extraOpts}`;
   };
 
   await new Promise<void>((resolve, reject) => {
