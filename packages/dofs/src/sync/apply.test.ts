@@ -537,3 +537,151 @@ describe("applyChanges with read-only mount roots", () => {
     });
   });
 });
+
+describe("applyChanges mtime propagation (auto_cache contract)", () => {
+  // The FUSE driver mounts with WSD_FUSE_AUTO_CACHE=1 in the
+  // production-safe profile. auto_cache tells the kernel to keep
+  // file data in the page cache until the file is reopened with a
+  // different mtime or size; the kernel then drops the cached
+  // pages and re-reads through FUSE. The whole story rests on
+  // mtime moving forward whenever the bytes change, including the
+  // tricky cases where size stays the same.
+  //
+  // These tests pin that contract on the sync apply path. If a
+  // future apply refactor stops propagating mtime, a container
+  // with auto_cache enabled would keep serving the old bytes
+  // after a remote push and the cache-coherency story would
+  // silently break.
+
+  it("bumps destination mtime when a same-size file changes content", async () => {
+    await withTwoDBs(
+      async (a) => {
+        // Source: write the first version, push, then overwrite
+        // with bytes of the same length but a different value
+        // and a strictly later mtime.
+        await writeFile(a, "/note.txt", "alpha", {}, () => 1000);
+        const first = await drain(coalesceChanges(a, 0));
+        const firstObjects = await collectObjects(a, first);
+
+        await writeFile(a, "/note.txt", "OMEGA", {}, () => 2000);
+        const second = await drain(coalesceChanges(a, Math.max(...first.map((e) => e.rev))));
+        const secondObjects = await collectObjects(a, second);
+        return { first, firstObjects, second, secondObjects };
+      },
+      async (b, { first, firstObjects, second, secondObjects }) => {
+        await applyChanges(b, first, firstObjects);
+        const beforeInode = resolveInode(b, "/note.txt");
+        expect(beforeInode).not.toBeNull();
+        expect(beforeInode?.mtime).toBe(1000);
+        expect(await readFile(b, "/note.txt", "utf8")).toBe("alpha");
+
+        await applyChanges(b, second, secondObjects);
+        const afterInode = resolveInode(b, "/note.txt");
+        expect(afterInode).not.toBeNull();
+        // Bytes changed: the kernel must see a strictly newer
+        // mtime so auto_cache drops the page cache on reopen.
+        expect(afterInode?.mtime).toBeGreaterThan(beforeInode?.mtime ?? 0);
+        expect(afterInode?.mtime).toBe(2000);
+        expect(await readFile(b, "/note.txt", "utf8")).toBe("OMEGA");
+      },
+    );
+  });
+
+  it("skips an apply when bytes are identical even if the source mtime is newer", async () => {
+    // The mirror of the test above. If a sender pushes the same
+    // content with a fresher mtime, the apply path takes the
+    // alreadyApplied fast path and does not touch the local row.
+    // The local mtime stays put. This is by design: auto_cache
+    // only needs to invalidate when bytes change. A pure mtime
+    // bump would still be safe (the kernel would invalidate and
+    // re-read identical bytes), but it would burn a local rev
+    // for nothing.
+    await withTwoDBs(
+      async (a) => {
+        await writeFile(a, "/same.txt", "static", {}, () => 1000);
+        const first = await drain(coalesceChanges(a, 0));
+        const firstObjects = await collectObjects(a, first);
+        // Re-stamp the same bytes with a newer mtime on the
+        // source. This isn't something writeFile normally
+        // produces (it bumps rev and emits the same chunks), but
+        // it's the worst case a future sender might present.
+        const reissued = first.map((entry): ChangeEntry => {
+          if (entry.kind !== "file" || entry.path !== "/same.txt") return entry;
+          return { ...entry, mtime: 9999, rev: entry.rev + 1000 };
+        });
+        return { first, firstObjects, reissued };
+      },
+      async (b, { first, firstObjects, reissued }) => {
+        // First apply is from upstream too, so the local rev
+        // counter doesn't claim the bytes as a local write.
+        await applyChanges(b, first, firstObjects, { source: "upstream" });
+        const beforeInode = resolveInode(b, "/same.txt");
+        expect(beforeInode?.mtime).toBe(1000);
+
+        // Reapply with a fresh mtime but identical chunks. The
+        // upstream-source guard runs alreadyApplied(), which
+        // matches on manifest hash and drops the entry.
+        await applyChanges(b, reissued, firstObjects, { source: "upstream" });
+        const afterInode = resolveInode(b, "/same.txt");
+        // alreadyApplied caught the no-op; the mtime stays at
+        // 1000 because the row never moved. auto_cache's safety
+        // story is unaffected — the bytes are still the same,
+        // so a stale page cache would still return correct bytes.
+        expect(afterInode?.mtime).toBe(1000);
+      },
+    );
+  });
+
+  it("bumps destination mtime when a file shrinks", async () => {
+    // Size change alone is enough to invalidate auto_cache, but
+    // the kernel still consults mtime first. Make sure the
+    // shrinking case carries the new mtime through so a fast
+    // mtime-cache check at the kernel layer can short-circuit.
+    await withTwoDBs(
+      async (a) => {
+        await writeFile(a, "/shrink.txt", "original-content", {}, () => 1000);
+        const first = await drain(coalesceChanges(a, 0));
+        const firstObjects = await collectObjects(a, first);
+
+        await writeFile(a, "/shrink.txt", "x", {}, () => 2000);
+        const second = await drain(coalesceChanges(a, Math.max(...first.map((e) => e.rev))));
+        const secondObjects = await collectObjects(a, second);
+        return { first, firstObjects, second, secondObjects };
+      },
+      async (b, { first, firstObjects, second, secondObjects }) => {
+        await applyChanges(b, first, firstObjects);
+        await applyChanges(b, second, secondObjects);
+        const inode = resolveInode(b, "/shrink.txt");
+        expect(inode?.mtime).toBe(2000);
+        expect(await readFile(b, "/shrink.txt", "utf8")).toBe("x");
+      },
+    );
+  });
+
+  it("bumps mtime on the sync-style synchronous apply path too", async () => {
+    // applyChangesSync is the alternate entry point used by
+    // SyncRPC.fetch's commit phase. It walks the same
+    // alreadyApplied / writeFileSync path as applyChanges, but
+    // the two paths are easy to drift apart in a refactor. Lock
+    // the same mtime-propagation contract on both.
+    await withTwoDBs(
+      async (a) => {
+        await writeFile(a, "/sync.txt", "first", {}, () => 1000);
+        const first = await drain(coalesceChanges(a, 0));
+        const firstObjects = await collectObjects(a, first);
+
+        await writeFile(a, "/sync.txt", "SECOND", {}, () => 2000);
+        const second = await drain(coalesceChanges(a, Math.max(...first.map((e) => e.rev))));
+        const secondObjects = await collectObjects(a, second);
+        return { first, firstObjects, second, secondObjects };
+      },
+      async (b, { first, firstObjects, second, secondObjects }) => {
+        applyChangesSync(b, first, firstObjects);
+        expect(resolveInode(b, "/sync.txt")?.mtime).toBe(1000);
+        applyChangesSync(b, second, secondObjects);
+        expect(resolveInode(b, "/sync.txt")?.mtime).toBe(2000);
+        expect(await readFile(b, "/sync.txt", "utf8")).toBe("SECOND");
+      },
+    );
+  });
+});
