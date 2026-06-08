@@ -150,6 +150,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
   interface FileEntry {
     buf: Buffer; // capacity buffer (may be larger than size)
     size: number; // logical end-of-file
+    dirty: boolean; // true when the buffer must be spilled into the VFS
   }
   const files = new Map<string, FileEntry>();
   // Returns true on success, false if `needed` exceeds MAX_FILE_BYTES.
@@ -182,9 +183,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
   // kernel; returns 0 on success or when there's nothing to do.
   const flushEntry = (path: string): number => {
     const entry = files.get(path);
-    if (entry === undefined) return 0;
+    if (entry === undefined || !entry.dirty) return 0;
     try {
       vfs.writeFileSync(toVfs(path), entry.buf.subarray(0, entry.size));
+      entry.dirty = false;
       return 0;
     } catch (error) {
       return toErrno(error);
@@ -284,7 +286,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
         // Register the inode in the VFS so dir listings / stat see it,
         // but keep actual content in our buffer store.
         vfs.writeFileSync(vfsPath, Buffer.alloc(0), { mode });
-        files.set(path, { buf: Buffer.alloc(0), size: 0 });
+        files.set(path, { buf: Buffer.alloc(0), size: 0, dirty: false });
         cb(0, openHandle(path));
       } catch (error) {
         cb(toErrno(error), 0);
@@ -298,7 +300,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
         // tracking it). Lazy-hydrate from the VFS.
         try {
           const data = vfs.readFileSync(toVfs(path));
-          entry = { buf: data, size: data.length };
+          entry = { buf: data, size: data.length, dirty: false };
           files.set(path, entry);
         } catch (error) {
           cb(toErrno(error));
@@ -321,7 +323,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
           cb(ERRNO.ENOENT);
           return;
         }
-        entry = { buf: Buffer.alloc(0), size: 0 };
+        entry = { buf: Buffer.alloc(0), size: 0, dirty: false };
         files.set(path, entry);
       }
       const end = position + length;
@@ -331,6 +333,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
       }
       buffer.copy(entry.buf, position, 0, length);
       if (end > entry.size) entry.size = end;
+      entry.dirty = true;
       cb(length);
     },
 
@@ -364,7 +367,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
       }
       let entry = files.get(path);
       if (entry === undefined) {
-        entry = { buf: Buffer.alloc(0), size: 0 };
+        entry = { buf: Buffer.alloc(0), size: 0, dirty: false };
         files.set(path, entry);
       }
       if (size > entry.size) {
@@ -375,6 +378,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
         entry.buf.fill(0, entry.size, size);
       }
       entry.size = size;
+      entry.dirty = true;
       cb(0);
     },
 

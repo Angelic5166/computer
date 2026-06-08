@@ -389,6 +389,64 @@ test("FUSE ops translate kernel-relative paths onto the configured mount point",
   expect(vfs.existsSync("/repo/b.txt")).toBe(false);
 });
 
+test("FUSE clean buffers are not spilled repeatedly", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/clean-after-flush.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+  const fh = create.result as number;
+
+  let writesAfterCreate = 0;
+  const writeFileSync = vfs.writeFileSync.bind(vfs);
+  vfs.writeFileSync = (...args: Parameters<typeof vfs.writeFileSync>) => {
+    writesAfterCreate += 1;
+    return writeFileSync(...args);
+  };
+
+  const payload = Buffer.from("spill-once", "utf8");
+  expect(
+    await status((cb) =>
+      ops.write("/clean-after-flush.txt", fh, payload, payload.byteLength, 0, cb),
+    ),
+  ).toBe(payload.byteLength);
+
+  expect(await status((cb) => ops.flush("/clean-after-flush.txt", fh, cb))).toBe(0);
+  expect(await status((cb) => ops.fsync("/clean-after-flush.txt", fh, 0, cb))).toBe(0);
+  expect(await status((cb) => ops.release("/clean-after-flush.txt", fh, cb))).toBe(0);
+
+  expect(writesAfterCreate).toBe(1);
+  expect(Buffer.from(vfs.readFileSync("/clean-after-flush.txt")).toString("utf8")).toBe(
+    "spill-once",
+  );
+});
+
+test("FUSE read-only hydrated buffers are not spilled on close", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  vfs.writeFileSync("/read-only.txt", Buffer.from("existing", "utf8"));
+  const ops = makeFUSEOps(vfs);
+
+  let writesAfterSeed = 0;
+  const writeFileSync = vfs.writeFileSync.bind(vfs);
+  vfs.writeFileSync = (...args: Parameters<typeof vfs.writeFileSync>) => {
+    writesAfterSeed += 1;
+    return writeFileSync(...args);
+  };
+
+  const open = await callback((cb) => ops.open("/read-only.txt", 0, cb));
+  expect(open.errno).toBe(0);
+  const fh = open.result as number;
+  const buf = Buffer.alloc(8);
+  expect(await status((cb) => ops.read("/read-only.txt", fh, buf, buf.byteLength, 0, cb))).toBe(8);
+  expect(buf.toString()).toBe("existing");
+
+  expect(await status((cb) => ops.flush("/read-only.txt", fh, cb))).toBe(0);
+  expect(await status((cb) => ops.release("/read-only.txt", fh, cb))).toBe(0);
+  expect(writesAfterSeed).toBe(0);
+});
+
 test("FUSE ops reject a relative mountPoint", async () => {
   const { vfs } = await createNodeVirtualFileSystem();
   expect(() => makeFUSEOps(vfs, "workspace")).toThrow(/absolute/);
