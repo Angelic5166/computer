@@ -15,8 +15,17 @@ set -u
 apt-get update >/dev/null 2>&1
 apt-get install -y --no-install-recommends fuse3 libfuse2t64 attr util-linux coreutils findutils git ca-certificates curl npm >/dev/null 2>&1
 
-mkdir -p /tmp/workspace
-PORT=45678 MOUNT_POINT=/tmp/workspace /usr/local/bin/wsd >/tmp/wsd.log 2>&1 &
+# /tmp/baseline gives the bench a native target to compare against. The
+# previous version forgot to create it, so fs-bench silently dropped the
+# baseline column from its output.
+mkdir -p /tmp/workspace /tmp/baseline
+# Forward optional tracer config to wsd. When WSD_FUSE_TRACE=summary is
+# set the daemon writes a JSON summary on unmount or SIGUSR2; with
+# WSD_FUSE_TRACE_FILE pointed at a host-mounted path the trace survives
+# the container.
+WSD_FUSE_TRACE="${WSD_FUSE_TRACE:-}" \
+  WSD_FUSE_TRACE_FILE="${WSD_FUSE_TRACE_FILE:-}" \
+  PORT=45678 MOUNT_POINT=/tmp/workspace /usr/local/bin/wsd >/tmp/wsd.log 2>&1 &
 WSD_PID=$!
 
 for i in $(seq 1 60); do
@@ -33,9 +42,15 @@ if ! kill -0 "$WSD_PID" 2>/dev/null; then
   exit 1
 fi
 
+# Forward bench knobs (REPS, WARMUP, RANDOMIZE_TARGETS, OUTPUT_JSON,
+# SCENARIOS) into the bench. fs-bench reads them from the environment.
 MOUNT=/tmp/workspace BASE=/tmp/baseline /usr/local/bin/fs-bench
 status=$?
 
+# Ask wsd to dump the FUSE trace (if enabled) before the SIGTERM. The
+# trace handler is async, so give it a moment to land on disk before we
+# wait on the process.
+kill -USR2 "$WSD_PID" 2>/dev/null && sleep 1
 kill "$WSD_PID" 2>/dev/null
 wait "$WSD_PID" 2>/dev/null
 exit $status

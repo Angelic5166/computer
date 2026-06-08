@@ -27,6 +27,11 @@ REPS="${REPS:-1}"           # timed repetitions per scenario per target
 WARMUP="${WARMUP:-1}"       # warmup (untimed) repetitions per scenario per target
 RANDOMIZE_TARGETS="${RANDOMIZE_TARGETS:-1}"
 OUTPUT_JSON="${OUTPUT_JSON:-}"
+# Comma-separated substring filter. When set, only scenarios whose names
+# contain at least one of the listed substrings run. Useful for sweeps
+# that iterate on a single hot scenario without paying for the full
+# suite.
+SCENARIOS="${SCENARIOS:-}"
 
 # results format: NAME|LABEL|MEAN_NS|MEDIAN_NS|P95_NS|MIN_NS|MAX_NS|SAMPLES
 results=()
@@ -82,11 +87,23 @@ label_for() {
 
 # Run one (scenario, target) pair once, returning wall-clock ns on stdout
 # or "FAIL" on failure. Caller is responsible for setup/teardown messaging.
+#
+# When `prep` is non-empty, it runs in the fresh subdir before the timer
+# starts. This lets pure-read / pure-copy scenarios stage their input
+# file outside the timed region so the measurement isn't dominated by
+# the cost of writing the file in the first place.
 run_once() {
-  local base_dir="$1" cmd="$2"
+  local base_dir="$1" cmd="$2" prep="${3:-}"
   local dir="$base_dir/.bench.$$.$RANDOM"
   rm -rf "$dir" 2>/dev/null
   mkdir -p "$dir"
+  if [[ -n "$prep" ]]; then
+    if ! (cd "$dir" && eval "$prep") >/dev/null 2>&1; then
+      rm -rf "$dir" 2>/dev/null
+      echo "FAIL"
+      return
+    fi
+  fi
   local t0 t1
   t0=$(now_ns)
   if ! (cd "$dir" && eval "$cmd") >/dev/null 2>&1; then
@@ -99,10 +116,28 @@ run_once() {
   echo $(( t1 - t0 ))
 }
 
+# Substring-list match for SCENARIOS. Returns 0 (match) when the filter
+# is unset, or when the name contains any of the comma-separated
+# substrings; 1 otherwise.
+scenario_matches() {
+  local name="$1"
+  if [[ -z "$SCENARIOS" ]]; then return 0; fi
+  local IFS=,
+  for pat in $SCENARIOS; do
+    if [[ "$name" == *"$pat"* ]]; then return 0; fi
+  done
+  return 1
+}
+
 # Run a scenario across all targets with warmup + REPS timed reps. Records
 # one entry per (scenario, target) in `results` containing aggregate stats.
+#
+# Optional third argument: prep command, run in each fresh directory
+# before the timer starts. Pure-read and pure-copy scenarios use this to
+# stage their input file outside the timed region.
 run_scenario() {
-  local name="$1" cmd="$2"
+  local name="$1" cmd="$2" prep="${3:-}"
+  if ! scenario_matches "$name"; then return; fi
 
   # Per-target sample lists, one ns per rep.
   declare -A samples
@@ -118,7 +153,7 @@ run_scenario() {
     shuffle_targets "${TARGETS[@]}"
     for t in $SHUFFLED; do
       local r
-      r=$(run_once "$t" "$cmd")
+      r=$(run_once "$t" "$cmd" "$prep")
       if [[ "$r" == "FAIL" ]]; then failed[$t]=1; fi
     done
   done
@@ -130,7 +165,7 @@ run_scenario() {
     for t in $SHUFFLED; do
       if [[ "${failed[$t]}" == "1" ]]; then continue; fi
       local r
-      r=$(run_once "$t" "$cmd")
+      r=$(run_once "$t" "$cmd" "$prep")
       if [[ "$r" == "FAIL" ]]; then
         failed[$t]=1
         continue
@@ -208,6 +243,10 @@ section "large file I/O"
 run_scenario "write 64 MiB" '
   dd if=/dev/zero of=big bs=1M count=64 status=none
 '
+# The original copy/read scenarios time the source-file creation as well
+# as the operation under test. The pure variants below stage the source
+# file in the prep phase so the timed region measures only the read or
+# copy. Both shapes are kept so historical numbers remain comparable.
 run_scenario "copy 64 MiB" '
   dd if=/dev/zero of=big bs=1M count=64 status=none
   cp big big2
@@ -215,6 +254,21 @@ run_scenario "copy 64 MiB" '
 run_scenario "read 64 MiB" '
   dd if=/dev/zero of=big bs=1M count=64 status=none
   cat big > /dev/null
+'
+run_scenario "pure read 64 MiB" '
+  cat big > /dev/null
+' '
+  dd if=/dev/zero of=big bs=1M count=64 status=none
+'
+run_scenario "pure copy 64 MiB" '
+  cp big big2
+' '
+  dd if=/dev/zero of=big bs=1M count=64 status=none
+'
+run_scenario "overwrite 64 MiB" '
+  dd if=/dev/zero of=big bs=1M count=64 status=none conv=notrunc
+' '
+  dd if=/dev/zero of=big bs=1M count=64 status=none
 '
 
 if have git; then
