@@ -580,3 +580,95 @@ test("FUSE buffered writes surface a fresh size through getattr before flush", a
   );
   expect((stat.result as { size: number }).size).toBe(payload.byteLength);
 });
+
+test("FUSE mode survives a flush after chmod on a pre-existing file", async () => {
+  // Regression: flushEntry used to call vfs.writeFileSync without a
+  // mode, so writeFileSync's `mode ?? 0o644` default would silently
+  // overwrite the persisted mode on every spill. The FUSE-side
+  // getattr still saw the right mode (via the meta override) but RPC
+  // consumers reading through the VFS saw 0o644. Pin the persisted
+  // mode through a chmod + write + flush cycle.
+  const { vfs } = await createNodeVirtualFileSystem();
+  vfs.writeFileSync("/mode.txt", Buffer.from("a"), { mode: 0o755 });
+  const ops = makeFUSEOps(vfs);
+
+  expect(await status((cb) => ops.chmod("/mode.txt", 0o600, cb))).toBe(0);
+
+  const open = await callback((cb) => ops.open("/mode.txt", 0, cb));
+  expect(open.errno).toBe(0);
+  const fh = open.result as number;
+  await status((cb) => ops.write("/mode.txt", fh, Buffer.from("b"), 1, 0, cb));
+  expect(await status((cb) => ops.flush("/mode.txt", fh, cb))).toBe(0);
+
+  expect(vfs.statSync("/mode.txt").mode & 0o7777).toBe(0o600);
+});
+
+test("FUSE create+chmod+flush persists the chmod'd mode in the VFS", async () => {
+  // Companion to the test above for the deferred-create path: a
+  // chmod before the first flush must still reach the VFS write.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/new.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+  const fh = create.result as number;
+  await status((cb) => ops.write("/new.txt", fh, Buffer.from("x"), 1, 0, cb));
+  expect(await status((cb) => ops.chmod("/new.txt", 0o600, cb))).toBe(0);
+  expect(await status((cb) => ops.flush("/new.txt", fh, cb))).toBe(0);
+
+  expect(vfs.statSync("/new.txt").mode & 0o7777).toBe(0o600);
+});
+
+test("FUSE rename of a pending-create file overwrites an existing destination", async () => {
+  // Regression: the pending-create branch in rename returned
+  // EEXIST when the destination existed. POSIX rename(2) allows
+  // overwriting a regular file at the destination, and the non-
+  // pending-create branch already does. The driver-internal
+  // create-not-yet-flushed window shouldn't be visible to callers.
+  const { vfs } = await createNodeVirtualFileSystem();
+  vfs.writeFileSync("/dst.txt", Buffer.from("old"));
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/src.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+  const fh = create.result as number;
+  await status((cb) => ops.write("/src.txt", fh, Buffer.from("new"), 3, 0, cb));
+
+  expect(await status((cb) => ops.rename("/src.txt", "/dst.txt", cb))).toBe(0);
+  expect(await status((cb) => ops.flush("/dst.txt", fh, cb))).toBe(0);
+
+  expect(Buffer.from(vfs.readFileSync("/dst.txt")).toString("utf8")).toBe("new");
+});
+
+test("FUSE getattr on a pending-create file returns a stable mtime", async () => {
+  // Regression: pendingStat returned `new Date()` every call, so two
+  // consecutive stats of an unchanged inode reported different
+  // mtimes. With auto_cache on, an advancing mtime forces the kernel
+  // to invalidate the page cache on every open for the lifetime of
+  // the pending-create window. Pin the stable contract.
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/stable.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+
+  const first = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/stable.txt", cb),
+  );
+  expect(first.errno).toBe(0);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const second = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.getattr("/stable.txt", cb),
+  );
+  expect(second.errno).toBe(0);
+
+  expect((second.result as { mtime: Date }).mtime.getTime()).toBe(
+    (first.result as { mtime: Date }).mtime.getTime(),
+  );
+});

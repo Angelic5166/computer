@@ -169,7 +169,31 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     dirtyRanges: DirtyRange[];
     pendingCreate: boolean; // true until the first spill creates the VFS inode
     mode: number;
+    // Frozen mtime for the pending-create window. pendingStat returns
+    // this so consecutive stats of an unchanged inode look stable, and
+    // auto_cache doesn't invalidate the page cache on every open of a
+    // newly-created file. flushEntry doesn't use it — the persisted
+    // mtime comes from writeFile's `now()` callback.
+    pendingMtime: Date;
   }
+
+  // Read the effective mode for an existing VFS inode at
+  // lazy-hydrate time. Prefers an earlier chmod recorded in `meta`
+  // (because chmod runs before any FileEntry exists for a path
+  // that hadn't been written to yet) and falls back to the
+  // persisted VFS mode. Without this, every spill of a non-pending-
+  // create file would default to 0o644 and silently downgrade modes
+  // set by writeFile or chmod.
+  const modeFromVfs = (path: string): number => {
+    const override = meta.get(path)?.mode;
+    if (override !== undefined) return override & 0o7777;
+    try {
+      return vfs.lstatSync(toVfs(path)).mode & 0o7777;
+    } catch {
+      // Caller is about to fail too; default keeps the type honest.
+      return 0o644;
+    }
+  };
   const files = new Map<string, FileEntry>();
   const rangedWriteVfs = vfs as NodeVirtualFileSystem & Partial<RangedWriteVfs>;
   const markDirty = (entry: FileEntry, start: number, end: number): void => {
@@ -184,12 +208,18 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
   const isPendingCreate = (path: string): boolean => files.get(path)?.pendingCreate === true;
   const exists = (path: string): boolean => isPendingCreate(path) || vfs.existsSync(toVfs(path));
   const pendingStat = (entry: FileEntry): FuseStat => {
-    const now = new Date();
     return {
-      mtime: now,
-      atime: now,
-      ctime: now,
+      // Frozen from create() so consecutive stats of an unchanged
+      // pending-create file return the same timestamps. Critical for
+      // auto_cache: an advancing mtime would force the kernel to drop
+      // the page cache on every open before the first flush lands.
+      mtime: entry.pendingMtime,
+      atime: entry.pendingMtime,
+      ctime: entry.pendingMtime,
       size: entry.size,
+      // S_IFREG | permission bits. The driver only ever stages regular
+      // files this way; directories and symlinks go straight to the
+      // VFS in their own ops.
       mode: 0o100000 | (entry.mode & 0o7777),
       uid: typeof process.getuid === "function" ? process.getuid() : 0,
       gid: typeof process.getgid === "function" ? process.getgid() : 0,
@@ -229,10 +259,16 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     if (entry === undefined || !entry.dirty) return 0;
     try {
       const data = entry.buf.subarray(0, entry.size);
+      // Pass the cached mode so writeFile doesn't fall back to its
+      // 0o644 default. Without this, a chmod between create/open and
+      // flush would land on the FUSE-side meta override but never
+      // reach the persisted VFS row, so RPC consumers would see the
+      // wrong mode.
+      const writeOpts = { mode: entry.mode & 0o7777 };
       if (rangedWriteVfs.writeFileRangesSync !== undefined && entry.dirtyRanges.length > 0) {
-        rangedWriteVfs.writeFileRangesSync(toVfs(path), data, entry.dirtyRanges);
+        rangedWriteVfs.writeFileRangesSync(toVfs(path), data, entry.dirtyRanges, writeOpts);
       } else {
-        vfs.writeFileSync(toVfs(path), data);
+        vfs.writeFileSync(toVfs(path), data, writeOpts);
       }
       entry.dirty = false;
       entry.dirtyRanges = [];
@@ -346,6 +382,11 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
         // Defer the VFS inode write until flush/release/fsync. Most create
         // workloads immediately write content, so persisting an empty file here
         // doubles provider work for tiny files.
+        //
+        // dirty=true with an empty dirtyRanges array is deliberate: it
+        // routes flushEntry to the whole-file writeFileSync path, which
+        // is what registers the inode the first time. The subsequent
+        // write() / truncate() ops append real ranges.
         files.set(path, {
           buf: Buffer.alloc(0),
           size: 0,
@@ -353,6 +394,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
           dirtyRanges: [],
           pendingCreate: true,
           mode,
+          pendingMtime: new Date(),
         });
         cb(0, openHandle(path));
       } catch (error) {
@@ -364,7 +406,8 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
       let entry = files.get(path);
       if (entry === undefined) {
         // File was created out-of-band (e.g. before this driver started
-        // tracking it). Lazy-hydrate from the VFS.
+        // tracking it). Lazy-hydrate from the VFS, carrying the
+        // persisted mode forward so a later flush doesn't downgrade it.
         try {
           const data = vfs.readFileSync(toVfs(path));
           entry = {
@@ -373,7 +416,8 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
             dirty: false,
             dirtyRanges: [],
             pendingCreate: false,
-            mode: 0o644,
+            mode: modeFromVfs(path),
+            pendingMtime: new Date(),
           };
           files.set(path, entry);
         } catch (error) {
@@ -405,7 +449,8 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
             dirty: false,
             dirtyRanges: [],
             pendingCreate: false,
-            mode: 0o644,
+            mode: modeFromVfs(path),
+            pendingMtime: new Date(),
           };
           files.set(path, entry);
         } catch (error) {
@@ -462,7 +507,8 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
             dirty: false,
             dirtyRanges: [],
             pendingCreate: false,
-            mode: 0o644,
+            mode: modeFromVfs(path),
+            pendingMtime: new Date(),
           };
           files.set(path, entry);
         } catch (error) {
@@ -519,10 +565,20 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     rename(source, destination, cb) {
       try {
         if (isPendingCreate(source)) {
-          if (exists(destination)) {
-            cb(ERRNO.EEXIST);
-            return;
+          // Source hasn't been persisted yet, so there's nothing for
+          // the VFS to move. POSIX rename(2) overwrites a regular file
+          // at the destination; honour that here by unlinking any
+          // pre-existing destination inode and dropping any pending
+          // entry that was staged at it. The next flush of the
+          // remapped buffer will create the dest inode fresh.
+          const destPending = isPendingCreate(destination);
+          if (!destPending && vfs.existsSync(toVfs(destination))) {
+            vfs.unlinkSync(toVfs(destination));
           }
+          if (destPending) {
+            files.delete(destination);
+          }
+          meta.delete(destination);
         } else {
           vfs.renameSync(toVfs(source), toVfs(destination));
         }
