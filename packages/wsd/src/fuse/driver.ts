@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { writeFileSync as nodeWriteFileSync } from "node:fs";
 import { posix } from "node:path";
 import type { FUSEBackend } from "./backend.js";
 import { buildFuseOptionString } from "./options.js";
@@ -148,12 +148,54 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
   // whole-file readFileSync/writeFileSync cycle, which is O(N²) for
   // sequential writes. We keep an in-memory Buffer per regular file with
   // amortized doubling on growth.
+  interface DirtyRange {
+    start: number;
+    end: number;
+  }
+
+  interface RangedWriteVfs {
+    writeFileRangesSync(
+      path: string,
+      data: Buffer,
+      ranges: DirtyRange[],
+      options?: { mode?: number },
+    ): void;
+  }
+
   interface FileEntry {
     buf: Buffer; // capacity buffer (may be larger than size)
     size: number; // logical end-of-file
     dirty: boolean; // true when the buffer must be spilled into the VFS
+    dirtyRanges: DirtyRange[];
+    pendingCreate: boolean; // true until the first spill creates the VFS inode
+    mode: number;
   }
   const files = new Map<string, FileEntry>();
+  const rangedWriteVfs = vfs as NodeVirtualFileSystem & Partial<RangedWriteVfs>;
+  const markDirty = (entry: FileEntry, start: number, end: number): void => {
+    entry.dirty = true;
+    if (start < end) entry.dirtyRanges.push({ start, end });
+  };
+  const parentPath = (path: string): string => {
+    const parent = posix.dirname(path);
+    return parent === "." ? "/" : parent;
+  };
+  const baseName = (path: string): string => posix.basename(path);
+  const isPendingCreate = (path: string): boolean => files.get(path)?.pendingCreate === true;
+  const exists = (path: string): boolean => isPendingCreate(path) || vfs.existsSync(toVfs(path));
+  const pendingStat = (entry: FileEntry): FuseStat => {
+    const now = new Date();
+    return {
+      mtime: now,
+      atime: now,
+      ctime: now,
+      size: entry.size,
+      mode: 0o100000 | (entry.mode & 0o7777),
+      uid: typeof process.getuid === "function" ? process.getuid() : 0,
+      gid: typeof process.getgid === "function" ? process.getgid() : 0,
+      nlink: 1,
+    };
+  };
   // Returns true on success, false if `needed` exceeds MAX_FILE_BYTES.
   // Callers must surface the failure to FUSE as EFBIG.
   const ensureCapacity = (entry: FileEntry, needed: number): boolean => {
@@ -186,8 +228,15 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     const entry = files.get(path);
     if (entry === undefined || !entry.dirty) return 0;
     try {
-      vfs.writeFileSync(toVfs(path), entry.buf.subarray(0, entry.size));
+      const data = entry.buf.subarray(0, entry.size);
+      if (rangedWriteVfs.writeFileRangesSync !== undefined && entry.dirtyRanges.length > 0) {
+        rangedWriteVfs.writeFileRangesSync(toVfs(path), data, entry.dirtyRanges);
+      } else {
+        vfs.writeFileSync(toVfs(path), data);
+      }
       entry.dirty = false;
+      entry.dirtyRanges = [];
+      entry.pendingCreate = false;
       return 0;
     } catch (error) {
       return toErrno(error);
@@ -217,7 +266,12 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     readdir(path, cb) {
       try {
-        cb(0, vfs.readdirSync(toVfs(path)));
+        const entries = new Set(vfs.readdirSync(toVfs(path)));
+        for (const [pendingPath, entry] of files) {
+          if (entry.pendingCreate && parentPath(pendingPath) === path)
+            entries.add(baseName(pendingPath));
+        }
+        cb(0, [...entries]);
       } catch (error) {
         cb(toErrno(error), []);
       }
@@ -225,9 +279,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     getattr(path, cb) {
       try {
-        const stat = statNode(vfs.lstatSync(toVfs(path)));
-        // File content lives outside the VFS, so prefer our size.
         const entry = files.get(path);
+        const stat =
+          entry?.pendingCreate === true ? pendingStat(entry) : statNode(vfs.lstatSync(toVfs(path)));
+        // File content lives outside the VFS, so prefer our size.
         if (entry !== undefined) stat.size = entry.size;
         const override = meta.get(path);
         if (override) {
@@ -251,6 +306,11 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     open(path, _flags, cb) {
       try {
+        const entry = files.get(path);
+        if (entry?.pendingCreate === true) {
+          cb(0, openHandle(path));
+          return;
+        }
         const stat = vfs.statSync(toVfs(path));
         if (stat.isDirectory()) {
           cb(ERRNO.EISDIR, 0);
@@ -279,15 +339,21 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     create(path, mode, cb) {
       try {
-        const vfsPath = toVfs(path);
-        if (vfs.existsSync(vfsPath)) {
+        if (exists(path)) {
           cb(ERRNO.EEXIST, 0);
           return;
         }
-        // Register the inode in the VFS so dir listings / stat see it,
-        // but keep actual content in our buffer store.
-        vfs.writeFileSync(vfsPath, Buffer.alloc(0), { mode });
-        files.set(path, { buf: Buffer.alloc(0), size: 0, dirty: false });
+        // Defer the VFS inode write until flush/release/fsync. Most create
+        // workloads immediately write content, so persisting an empty file here
+        // doubles provider work for tiny files.
+        files.set(path, {
+          buf: Buffer.alloc(0),
+          size: 0,
+          dirty: true,
+          dirtyRanges: [],
+          pendingCreate: true,
+          mode,
+        });
         cb(0, openHandle(path));
       } catch (error) {
         cb(toErrno(error), 0);
@@ -301,7 +367,14 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
         // tracking it). Lazy-hydrate from the VFS.
         try {
           const data = vfs.readFileSync(toVfs(path));
-          entry = { buf: data, size: data.length, dirty: false };
+          entry = {
+            buf: data,
+            size: data.length,
+            dirty: false,
+            dirtyRanges: [],
+            pendingCreate: false,
+            mode: 0o644,
+          };
           files.set(path, entry);
         } catch (error) {
           cb(toErrno(error));
@@ -320,12 +393,25 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     write(path, _fh, buffer, length, position, cb) {
       let entry = files.get(path);
       if (entry === undefined) {
-        if (!vfs.existsSync(toVfs(path))) {
+        if (!exists(path)) {
           cb(ERRNO.ENOENT);
           return;
         }
-        entry = { buf: Buffer.alloc(0), size: 0, dirty: false };
-        files.set(path, entry);
+        try {
+          const data = vfs.readFileSync(toVfs(path));
+          entry = {
+            buf: data,
+            size: data.length,
+            dirty: false,
+            dirtyRanges: [],
+            pendingCreate: false,
+            mode: 0o644,
+          };
+          files.set(path, entry);
+        } catch (error) {
+          cb(toErrno(error));
+          return;
+        }
       }
       const end = position + length;
       if (!ensureCapacity(entry, end)) {
@@ -334,7 +420,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
       }
       buffer.copy(entry.buf, position, 0, length);
       if (end > entry.size) entry.size = end;
-      entry.dirty = true;
+      markDirty(entry, position, end);
       cb(length);
     },
 
@@ -362,14 +448,27 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     },
 
     truncate(path, size, cb) {
-      if (!vfs.existsSync(toVfs(path))) {
+      if (!exists(path)) {
         cb(ERRNO.ENOENT);
         return;
       }
       let entry = files.get(path);
       if (entry === undefined) {
-        entry = { buf: Buffer.alloc(0), size: 0, dirty: false };
-        files.set(path, entry);
+        try {
+          const data = vfs.readFileSync(toVfs(path));
+          entry = {
+            buf: data,
+            size: data.length,
+            dirty: false,
+            dirtyRanges: [],
+            pendingCreate: false,
+            mode: 0o644,
+          };
+          files.set(path, entry);
+        } catch (error) {
+          cb(toErrno(error));
+          return;
+        }
       }
       if (size > entry.size) {
         if (!ensureCapacity(entry, size)) {
@@ -378,8 +477,9 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
         }
         entry.buf.fill(0, entry.size, size);
       }
+      const previousSize = entry.size;
       entry.size = size;
-      entry.dirty = true;
+      markDirty(entry, Math.min(previousSize, size), Math.max(previousSize, size));
       cb(0);
     },
 
@@ -389,7 +489,7 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     unlink(path, cb) {
       try {
-        vfs.unlinkSync(toVfs(path));
+        if (!isPendingCreate(path)) vfs.unlinkSync(toVfs(path));
         meta.delete(path);
         files.delete(path);
         cb(0);
@@ -418,7 +518,14 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     rename(source, destination, cb) {
       try {
-        vfs.renameSync(toVfs(source), toVfs(destination));
+        if (isPendingCreate(source)) {
+          if (exists(destination)) {
+            cb(ERRNO.EEXIST);
+            return;
+          }
+        } else {
+          vfs.renameSync(toVfs(source), toVfs(destination));
+        }
         const m = meta.get(source);
         if (m !== undefined) {
           meta.delete(source);
@@ -437,6 +544,10 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
 
     access(path, mode, cb) {
       try {
+        if (isPendingCreate(path)) {
+          cb(0);
+          return;
+        }
         vfs.accessSync(toVfs(path), mode);
         cb(0);
       } catch (error) {
@@ -461,16 +572,18 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     },
 
     chmod(path, mode, cb) {
-      if (!vfs.existsSync(toVfs(path))) {
+      if (!exists(path)) {
         cb(ERRNO.ENOENT);
         return;
       }
+      const entry = files.get(path);
+      if (entry !== undefined) entry.mode = mode;
       updateMeta(path, { mode });
       cb(0);
     },
 
     chown(path, uid, gid, cb) {
-      if (!vfs.existsSync(toVfs(path))) {
+      if (!exists(path)) {
         cb(ERRNO.ENOENT);
         return;
       }
@@ -582,7 +695,7 @@ export async function mountFuse(options: {
     const target = process.env.WSD_FUSE_TRACE_FILE;
     if (target !== undefined && target !== "") {
       try {
-        writeFileSync(target, `${json}\n`);
+        nodeWriteFileSync(target, `${json}\n`);
       } catch (error) {
         process.stderr.write(
           `wsd: failed to write FUSE trace to ${target} (${reason}): ${String(error)}\n${json}\n`,
@@ -602,7 +715,8 @@ export async function mountFuse(options: {
   // lets the kernel batch up to max_write bytes per FUSE op instead of the
   // default 4 KiB, cutting per-op round-trips ~32x on large sequential I/O.
   // buildFuseOptionString reads WSD_FUSE_* env vars; with none set it
-  // emits the historical "big_writes,max_write=131072,max_read=131072".
+  // emits the production-safe profile (auto_cache plus one-second
+  // metadata timeouts) backed by the auto_cache contract tests.
   const origFuseOptions = fuse._fuseOptions.bind(fuse);
   const extraOpts = buildFuseOptionString(process.env);
   fuse._fuseOptions = (): string => {

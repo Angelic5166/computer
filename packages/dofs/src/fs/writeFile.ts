@@ -18,6 +18,11 @@ export interface WriteFileOptions {
   mode?: number;
 }
 
+export interface WriteFileRange {
+  start: number;
+  end: number;
+}
+
 // Resolve directory-only paths (the parent of the target file). The
 // final segment is handled by the caller. Returns the parent inode or
 // throws ENOENT/ENOTDIR.
@@ -72,6 +77,11 @@ function sha256(bytes: Uint8Array): Uint8Array {
 interface PreparedChunk {
   hash: Uint8Array;
   bytes: Uint8Array;
+  size: number;
+}
+
+interface ChunkRef {
+  hash: Uint8Array;
   size: number;
 }
 
@@ -240,6 +250,72 @@ async function writeFileStreaming(
   });
 }
 
+function upsertChunkBlob(db: Database, chunk: PreparedChunk, lastSeen: number): void {
+  db.run(
+    "INSERT INTO vfs_blobs (hash, size, last_seen) VALUES (?, ?, ?) ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen",
+    chunk.hash,
+    chunk.size,
+    lastSeen,
+  );
+  db.run(
+    "INSERT INTO vfs_blob_bytes (hash, bytes) VALUES (?, ?) ON CONFLICT(hash) DO NOTHING",
+    chunk.hash,
+    chunk.bytes,
+  );
+}
+
+function replaceChunkRows(
+  db: Database,
+  inode: number,
+  chunks: ChunkRef[],
+  manifestTime: number,
+): Uint8Array {
+  db.run("DELETE FROM vfs_chunks WHERE inode = ?", inode);
+  for (let idx = 0; idx < chunks.length; idx++) {
+    const chunk = chunks[idx];
+    db.run(
+      "INSERT INTO vfs_chunks (inode, idx, hash, size) VALUES (?, ?, ?, ?)",
+      inode,
+      idx,
+      chunk.hash,
+      chunk.size,
+    );
+  }
+  return buildManifest(db, chunks, manifestTime);
+}
+
+function rangesOverlap(start: number, end: number, ranges: WriteFileRange[]): boolean {
+  for (const range of ranges) {
+    if (range.start < end && start < range.end) return true;
+  }
+  return false;
+}
+
+function normalizeRanges(ranges: WriteFileRange[], size: number): WriteFileRange[] {
+  const normalized = ranges
+    .map((range) => ({
+      start: Math.max(0, Math.min(size, Math.floor(range.start))),
+      end: Math.max(0, Math.min(size, Math.ceil(range.end))),
+    }))
+    .filter((range) => range.start < range.end)
+    .sort((a, b) => a.start - b.start);
+
+  const merged: WriteFileRange[] = [];
+  for (const range of normalized) {
+    const previous = merged.at(-1);
+    if (previous === undefined || previous.end < range.start) {
+      merged.push({ ...range });
+    } else {
+      previous.end = Math.max(previous.end, range.end);
+    }
+  }
+  return merged;
+}
+
+function existingChunkRefs(db: Database, inode: number): ChunkRef[] {
+  return db.all<ChunkRef>("SELECT hash, size FROM vfs_chunks WHERE inode = ? ORDER BY idx", inode);
+}
+
 // Synchronous entry point used by the VirtualProvider. Identical SQL
 // to the async path; differs only in that the bytes have already been
 // materialized.
@@ -303,17 +379,7 @@ export function writeFileSync(
     // Upsert blobs and write the new chunk list.
     for (let idx = 0; idx < chunks.length; idx++) {
       const chunk = chunks[idx];
-      db.run(
-        "INSERT INTO vfs_blobs (hash, size, last_seen) VALUES (?, ?, ?) ON CONFLICT(hash) DO UPDATE SET last_seen = excluded.last_seen",
-        chunk.hash,
-        chunk.size,
-        mtime,
-      );
-      db.run(
-        "INSERT INTO vfs_blob_bytes (hash, bytes) VALUES (?, ?) ON CONFLICT(hash) DO NOTHING",
-        chunk.hash,
-        chunk.bytes,
-      );
+      upsertChunkBlob(db, chunk, mtime);
       db.run(
         "INSERT INTO vfs_chunks (inode, idx, hash, size) VALUES (?, ?, ?, ?)",
         inode,
@@ -324,6 +390,96 @@ export function writeFileSync(
     }
 
     const manifestHash = buildManifest(db, chunks, mtime);
+    const rev = incrementRev(db);
+    db.run(
+      "UPDATE vfs_nodes SET mode = ?, mtime = ?, rev = ?, manifest_hash = ? WHERE inode = ?",
+      mode,
+      mtime,
+      rev,
+      manifestHash,
+      inode,
+    );
+  });
+}
+
+export function writeFileRangesSync(
+  db: Database,
+  path: string,
+  bytes: Uint8Array,
+  dirtyRanges: WriteFileRange[],
+  options: WriteFileOptions,
+  now: () => number,
+): void {
+  const { parts, path: canonical } = canonicalizePath(path);
+  if (parts.length === 0) {
+    throw createWorkspaceError("EISDIR", "cannot write to the root directory", canonical);
+  }
+  assertNotReadOnly(db, canonical);
+  const mode = (options.mode ?? 0o644) & 0o7777;
+  const ranges = normalizeRanges(dirtyRanges, bytes.byteLength);
+  const mtime = now();
+
+  db.transactionSync(() => {
+    const parentInode = resolveParent(db, parts, canonical);
+    const leafName = parts[parts.length - 1];
+    const existing = db.one<{ child_inode: number }>(
+      "SELECT child_inode FROM vfs_dirents WHERE parent_inode = ? AND name = ?",
+      parentInode,
+      leafName,
+    );
+
+    let inode: number;
+    let oldChunks: ChunkRef[] = [];
+    if (existing !== undefined) {
+      const node = db.one<{ type: "file" | "dir" }>(
+        "SELECT type FROM vfs_nodes WHERE inode = ?",
+        existing.child_inode,
+      );
+      if (node?.type === "dir") {
+        throw createWorkspaceError("EISDIR", `path is a directory: ${canonical}`, canonical);
+      }
+      inode = existing.child_inode;
+      oldChunks = existingChunkRefs(db, inode);
+    } else {
+      db.run(
+        "INSERT INTO vfs_nodes (type, mode, mtime, rev) VALUES ('file', ?, ?, 0)",
+        mode,
+        mtime,
+      );
+      const allocated = db.scalar<number>("SELECT last_insert_rowid()");
+      if (allocated === undefined) {
+        throw createWorkspaceError("EIO", "failed to allocate inode");
+      }
+      inode = allocated;
+      db.run(
+        "INSERT INTO vfs_dirents (parent_inode, name, child_inode) VALUES (?, ?, ?)",
+        parentInode,
+        leafName,
+        inode,
+      );
+    }
+
+    const nextChunks: ChunkRef[] = [];
+    const chunkCount = Math.ceil(bytes.byteLength / CHUNK_SIZE);
+    for (let idx = 0; idx < chunkCount; idx++) {
+      const start = idx * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, bytes.byteLength);
+      const size = end - start;
+      const oldChunk = oldChunks[idx];
+      if (oldChunk !== undefined && oldChunk.size === size && !rangesOverlap(start, end, ranges)) {
+        nextChunks.push(oldChunk);
+        continue;
+      }
+      const chunk = {
+        hash: sha256(bytes.subarray(start, end)),
+        bytes: bytes.subarray(start, end),
+        size,
+      };
+      upsertChunkBlob(db, chunk, mtime);
+      nextChunks.push({ hash: chunk.hash, size: chunk.size });
+    }
+
+    const manifestHash = replaceChunkRows(db, inode, nextChunks, mtime);
     const rev = incrementRev(db);
     db.run(
       "UPDATE vfs_nodes SET mode = ?, mtime = ?, rev = ?, manifest_hash = ? WHERE inode = ?",

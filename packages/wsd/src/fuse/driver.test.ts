@@ -333,13 +333,13 @@ test("FUSE getattr size matches what readFileSync would return", async () => {
   await status((cb: (value: number) => void) =>
     ops.write("/g.txt", fh, payload, payload.byteLength, 0, cb),
   );
-  // Buffer-only state: FUSE getattr leads, VFS lags. Documents the
-  // intentional window between write() and a flushing op.
+  // Buffer-only state: FUSE getattr leads, VFS has no inode yet. Documents
+  // the intentional deferred-create window between create/write and a flushing op.
   const beforeFlush = await callback((cb: (errno: number, result: unknown) => void) =>
     ops.getattr("/g.txt", cb),
   );
   expect((beforeFlush.result as { size: number }).size).toBe(12);
-  expect(vfs.statSync("/g.txt").size).toBe(0);
+  expect(() => vfs.statSync("/g.txt")).toThrow();
 
   // After flush both must agree — anything calling stat through
   // the VFS (RPC, host-side platformatic/vfs) needs the truth.
@@ -447,6 +447,65 @@ test("FUSE read-only hydrated buffers are not spilled on close", async () => {
   expect(writesAfterSeed).toBe(0);
 });
 
+test("FUSE flush uses ranged writes when the backing VFS supports them", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/ranged.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+  const fh = create.result as number;
+
+  const rangedCalls: Array<{
+    path: string;
+    data: Buffer;
+    ranges: Array<{ start: number; end: number }>;
+  }> = [];
+  const writeFileSync = vfs.writeFileSync.bind(vfs);
+  (
+    vfs as typeof vfs & {
+      writeFileRangesSync: (
+        path: string,
+        data: Buffer,
+        ranges: Array<{ start: number; end: number }>,
+      ) => void;
+    }
+  ).writeFileRangesSync = (path, data, ranges) => {
+    rangedCalls.push({
+      path,
+      data: Buffer.from(data),
+      ranges: ranges.map((range) => ({ ...range })),
+    });
+    writeFileSync(path, data);
+  };
+
+  expect(
+    await status((cb) => ops.write("/ranged.txt", fh, Buffer.from("hello"), "hello".length, 0, cb)),
+  ).toBe("hello".length);
+  expect(await status((cb) => ops.flush("/ranged.txt", fh, cb))).toBe(0);
+
+  expect(rangedCalls).toHaveLength(1);
+  expect(rangedCalls[0]).toMatchObject({ path: "/ranged.txt", ranges: [{ start: 0, end: 5 }] });
+  expect(rangedCalls[0].data.toString("utf8")).toBe("hello");
+});
+
+test("FUSE partial writes preserve existing content", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  vfs.writeFileSync("/partial.txt", Buffer.from("abcde", "utf8"));
+  const ops = makeFUSEOps(vfs);
+
+  const open = await callback((cb) => ops.open("/partial.txt", 0, cb));
+  expect(open.errno).toBe(0);
+  expect(
+    await status((cb) =>
+      ops.write("/partial.txt", open.result as number, Buffer.from("X"), 1, 2, cb),
+    ),
+  ).toBe(1);
+  expect(await status((cb) => ops.flush("/partial.txt", open.result as number, cb))).toBe(0);
+  expect(Buffer.from(vfs.readFileSync("/partial.txt")).toString("utf8")).toBe("abXde");
+});
+
 test("FUSE ops reject a relative mountPoint", async () => {
   const { vfs } = await createNodeVirtualFileSystem();
   expect(() => makeFUSEOps(vfs, "workspace")).toThrow(/absolute/);
@@ -477,9 +536,7 @@ test("FUSE getattr reflects mtime and size after an external VFS write", async (
 
   // Simulate a sync-side mutation: bytes change, length changes,
   // and (because the VFS uses a clock-driven mtime) mtime
-  // changes. Wait one millisecond so the clock has room to tick;
-  // a same-tick rewrite is unlikely from the sync path but the
-  // test wants to assert the steady-state contract, not race.
+  // changes. Wait a few ms so the clock has room to tick.
   await new Promise((resolve) => setTimeout(resolve, 5));
   vfs.writeFileSync("/sync.txt", Buffer.from("second payload"));
 
@@ -492,14 +549,19 @@ test("FUSE getattr reflects mtime and size after an external VFS write", async (
   expect(afterStat.mtime.getTime()).toBeGreaterThan(initialStat.mtime.getTime());
 });
 
-test("FUSE buffered writes still surface a fresh size through getattr", async () => {
-  // Companion to the auto_cache test above. With auto_cache the
-  // kernel only invalidates when mtime or size changes; if the
-  // driver's in-memory buffer were to mask a size growth from
-  // getattr (returning the on-VFS zero instead of the buffered
-  // length), the kernel would keep serving stale page-cache
-  // bytes after a local write. Lock the buffered-getattr
-  // behavior so a future buffer refactor can't regress it.
+test("FUSE buffered writes surface a fresh size through getattr before flush", async () => {
+  // Companion to the auto_cache contract test above. With
+  // auto_cache the kernel only invalidates when mtime or size
+  // changes; if the driver's in-memory buffer were to mask a
+  // size growth from getattr, the kernel would keep serving
+  // stale page-cache bytes after a local write. Lock the
+  // buffered-getattr behavior so a future buffer refactor can't
+  // regress it.
+  //
+  // The deferred-create path means the VFS has no inode at all
+  // before flush, so this test inspects only the FUSE-side
+  // getattr result; the matching VFS-side assertion lives in
+  // "FUSE getattr size matches what readFileSync would return".
   const { vfs } = await createNodeVirtualFileSystem();
   const ops = makeFUSEOps(vfs);
 
@@ -513,10 +575,6 @@ test("FUSE buffered writes still surface a fresh size through getattr", async ()
     ops.write("/buf.txt", fh, payload, payload.byteLength, 0, cb),
   );
 
-  // Buffered, not yet flushed: VFS still sees size 0; FUSE
-  // getattr must report the buffered size so the kernel
-  // page-cache logic sees the change.
-  expect(vfs.statSync("/buf.txt").size).toBe(0);
   const stat = await callback((cb: (errno: number, result: unknown) => void) =>
     ops.getattr("/buf.txt", cb),
   );

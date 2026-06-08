@@ -5,7 +5,7 @@ import type { Database } from "../storage.js";
 import { mkdir } from "./mkdir.js";
 import { resolveInode } from "./resolve.js";
 import { withDB } from "./with-db.js";
-import { CHUNK_SIZE, writeFile } from "./writeFile.js";
+import { CHUNK_SIZE, writeFile, writeFileRangesSync } from "./writeFile.js";
 
 // Reassemble a file's bytes by stitching its chunk rows together.
 // A deliberately minimal helper so writeFile tests can stand alone
@@ -36,6 +36,15 @@ function readBack(db: Database, path: string): Uint8Array {
     offset += part.byteLength;
   }
   return out;
+}
+
+function chunkRows(db: Database, path: string): Array<{ hash: Uint8Array; size: number }> {
+  const node = resolveInode(db, path);
+  if (node === null) throw new Error(`no such path: ${path}`);
+  return db.all<{ hash: Uint8Array; size: number }>(
+    "SELECT hash, size FROM vfs_chunks WHERE inode = ? ORDER BY idx",
+    node.inode,
+  );
 }
 
 function countBlobs(db: Database): number {
@@ -136,6 +145,50 @@ describe("writeFile", () => {
       expect(round.byteLength).toBe(CHUNK_SIZE + 100);
       expect(round[0]).toBe(0x41);
       expect(round[CHUNK_SIZE]).toBe(0x42);
+    });
+  });
+
+  it("range writes reuse unchanged chunks", async () => {
+    await withDB(async (db) => {
+      const first = new Uint8Array(CHUNK_SIZE);
+      first.fill(0x41);
+      const second = new Uint8Array(CHUNK_SIZE);
+      second.fill(0x42);
+      const third = new Uint8Array(CHUNK_SIZE);
+      third.fill(0x43);
+      const original = new Uint8Array(3 * CHUNK_SIZE);
+      original.set(first, 0);
+      original.set(second, CHUNK_SIZE);
+      original.set(third, 2 * CHUNK_SIZE);
+      await writeFile(db, "/big", original, {}, () => 100);
+      const beforeChunks = chunkRows(db, "/big");
+
+      let stagedBlobs = 0;
+      const run = db.run.bind(db);
+      db.run = (query: string, ...bindings: unknown[]) => {
+        if (query.startsWith("INSERT INTO vfs_blobs")) stagedBlobs += 1;
+        return run(query, ...bindings);
+      };
+
+      const next = new Uint8Array(original);
+      const changedOffset = CHUNK_SIZE + 123;
+      next[changedOffset] = 0x99;
+      writeFileRangesSync(
+        db,
+        "/big",
+        next,
+        [{ start: changedOffset, end: changedOffset + 1 }],
+        {},
+        () => 200,
+      );
+
+      expect(stagedBlobs).toBe(1);
+      expect(Array.from(readBack(db, "/big"))).toEqual(Array.from(next));
+      const afterChunks = chunkRows(db, "/big");
+      expect(afterChunks).toHaveLength(3);
+      expect(afterChunks[0].hash).toEqual(beforeChunks[0].hash);
+      expect(afterChunks[1].hash).not.toEqual(beforeChunks[1].hash);
+      expect(afterChunks[2].hash).toEqual(beforeChunks[2].hash);
     });
   });
 

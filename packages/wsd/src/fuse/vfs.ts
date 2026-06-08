@@ -70,6 +70,7 @@ const FORWARDED_METHODS = [
   "readFileSync",
   "writeFile",
   "writeFileSync",
+  "writeFileRangesSync",
   "appendFile",
   "appendFileSync",
   "exists",

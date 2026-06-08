@@ -23,7 +23,11 @@ import {
   type WatchHandle,
   type WatchOptions,
 } from "./fs/watch.js";
-import { writeFileSync as writeFileSyncImpl } from "./fs/writeFile.js";
+import {
+  type WriteFileRange,
+  writeFileRangesSync as writeFileRangesSyncImpl,
+  writeFileSync as writeFileSyncImpl,
+} from "./fs/writeFile.js";
 import { canonicalizePath } from "./path.js";
 import type { Database } from "./storage.js";
 
@@ -374,6 +378,20 @@ export class SQLiteWorkspaceProvider {
         ? new TextEncoder().encode(data)
         : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
     writeFileSyncImpl(this.db, path, bytes, { mode }, this.now);
+  }
+
+  writeFileRangesSync(
+    path: string,
+    data: string | Buffer,
+    ranges: WriteFileRange[],
+    options?: { encoding?: BufferEncoding; mode?: number } | BufferEncoding,
+  ): void {
+    const mode = typeof options === "string" ? undefined : options?.mode;
+    const bytes =
+      typeof data === "string"
+        ? new TextEncoder().encode(data)
+        : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    writeFileRangesSyncImpl(this.db, path, bytes, ranges, { mode }, this.now);
   }
 
   appendFile(
