@@ -154,6 +154,28 @@ describe("Workspace backend fallback", () => {
     await expect(ws.ready()).rejects.toThrow(/boom[\s\S]*kaboom/);
   });
 
+  it("does not cache a failed ready() attempt", async () => {
+    let attempts = 0;
+    const backend: WorkspaceBackend = {
+      id: "flaky",
+      async connect() {
+        attempts++;
+        if (attempts === 1) throw new Error("temporary container disconnect");
+        return {
+          rpc: composite(fakeRpc()),
+          close: async () => {},
+        };
+      },
+    };
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+
+    await expect(ws.ready()).rejects.toThrow(/temporary container disconnect/);
+    await ws.ready();
+
+    expect(attempts).toBe(2);
+    expect(ws.shell).toBeDefined();
+  });
+
   it("ready() is idempotent — subsequent calls reuse the same connection", async () => {
     const backend = makeBackend("only");
     const spy = vi.spyOn(backend, "connect");

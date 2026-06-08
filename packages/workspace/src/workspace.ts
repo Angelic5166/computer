@@ -219,14 +219,21 @@ export class Workspace {
   // the same in-flight connection attempt.
   ready(): Promise<void> {
     if (this.#readyPromise) return this.#readyPromise;
-    this.#readyPromise = (async () => {
+    const ready = (async () => {
       await this.#connect();
       // Index after the backend is wired so reads of mounted paths
       // are populated before the first push() inside an exec()
       // bracket can ship them.
       await this.#mountIndex.ensureIndexed();
     })();
-    return this.#readyPromise;
+    this.#readyPromise = ready;
+    ready.catch(() => {
+      // A failed connection attempt must not poison this Workspace forever.
+      // The next ready()/push()/pull()/exec should re-enter #connect(), giving
+      // backend factories a chance to pick a fresh transport.
+      if (this.#readyPromise === ready) this.#readyPromise = undefined;
+    });
+    return ready;
   }
 
   // Wrap this workspace in a WorkspaceStub so it can be handed
