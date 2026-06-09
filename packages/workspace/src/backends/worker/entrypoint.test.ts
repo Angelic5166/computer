@@ -14,8 +14,12 @@
 // out-of-date reference and an OOM in Bash takes nothing else
 // with it.
 
-import { describe, expect, it } from "vitest";
+import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import type { BackendHandle, WorkspaceBackend } from "../../backend.js";
+import type { WorkspaceStub } from "../../stub.js";
+import { Workspace } from "../../workspace.js";
 import { ShellWorker } from "./entrypoint.js";
 
 // In-isolate harness. ShellWorker is constructed without going
@@ -185,4 +189,190 @@ describe("ShellWorker", () => {
     expect(response.status).toBe(426);
     expect(await response.text()).toMatch(/Workers RPC/);
   });
+
+  // ---------------------------------------------------------------
+  // `git` custom command wiring
+  // ---------------------------------------------------------------
+  //
+  // These tests drive real just-bash through `new Bash({...})`
+  // against a real `WorkspaceFsAdapter` wrapping a real
+  // `Workspace` backed by SQLiteTestStorage. The host stub the
+  // env's getWorkspace() hands out is the production
+  // `WorkspaceStub` — same shape that crosses the wire in real
+  // deployments. The point is to exercise the full filesystem
+  // contract Bash relies on (stat-ing cwd at startup, the
+  // adapter's readdir / readlink / etc.) rather than discover
+  // gaps in production when an unshimmed call lands.
+  //
+  // The shim's argv-forwarding / stdin-decoding / throw-handling
+  // behaviour is unit-tested in `git-command.test.ts`. The
+  // standalone `extraCommands` ordering check stays on the
+  // bashFactoryOverride seam because it's purely structural.
+  describe("`git` custom command wiring", () => {
+    let workspace: Workspace;
+    let stub: WorkspaceStub;
+
+    beforeEach(async () => {
+      workspace = new Workspace({
+        storage: new SQLiteTestStorage() as never,
+        backends: [noopBackend()],
+      });
+      await workspace.ready();
+      // /workspace is the ShellWorker's default cwd; create it
+      // up front so Bash's startup stat() resolves.
+      await workspace.fs.mkdir("/workspace", { recursive: true });
+      stub = workspace.stub();
+    });
+
+    afterEach(async () => {
+      stub[Symbol.dispose]();
+      await workspace.close();
+    });
+
+    function envFor(ws: WorkspaceStub): FakeEnv {
+      return {
+        HOST: {
+          // Return the real WorkspaceStub. Its shape — fs +
+          // shell + git + Symbol.dispose — matches the
+          // `HostWorkspaceStub` interface the entrypoint
+          // declares structurally.
+          async getWorkspace() {
+            return ws as unknown as FakeWorkspace;
+          },
+        },
+      };
+    }
+
+    it("runs `git version` end-to-end through real Bash and real fs", async () => {
+      const worker = new ShellWorker(undefined as never, envFor(stub) as never);
+      const envelope = await worker.exec({
+        command: "git version",
+        cwd: "/workspace",
+        id: "run-git",
+      });
+      const events = (await drain(envelope.events)) as {
+        name: string;
+        value: string | number;
+      }[];
+      const stdout = events.find((e) => e.name === "stdout");
+      const exit = events.find((e) => e.name === "exit");
+      expect(stdout?.value).toContain("@cloudflare/workspace");
+      expect(exit?.value).toBe(0);
+    });
+
+    it("runs `git diff` end-to-end and observes a working-tree change", async () => {
+      // Seed a one-commit repo through the workspace's own git
+      // surface. We drive isomorphic-git directly through the
+      // adapter to avoid spinning up an HTTP server; the same
+      // bytes a `git init && git add && git commit` would write
+      // land in the workspace's SQLite store.
+      const { workspaceIsomorphicGitClient } = await import("../../git/adapter.js");
+      const isogit = await import("isomorphic-git");
+      const git = (isogit.default ?? isogit) as typeof isogit;
+      const fs = await workspaceIsomorphicGitClient(workspace.provider());
+      const dir = "/workspace";
+      await git.init({ fs: fs as unknown as object, dir, defaultBranch: "main" });
+      await workspace.fs.writeFile("/workspace/a.txt", "hello\n");
+      await git.add({ fs: fs as unknown as object, dir, filepath: "a.txt" });
+      await git.commit({
+        fs: fs as unknown as object,
+        dir,
+        message: "init",
+        author: { name: "t", email: "t@example.test" },
+      });
+      // Mutate the working tree so the diff is non-empty.
+      await workspace.fs.writeFile("/workspace/a.txt", "hello world\n");
+
+      const worker = new ShellWorker(undefined as never, envFor(stub) as never);
+      const envelope = await worker.exec({
+        command: "git diff",
+        cwd: "/workspace",
+      });
+      const events = (await drain(envelope.events)) as {
+        name: string;
+        value: string | number;
+      }[];
+      const stdout = events.find((e) => e.name === "stdout");
+      const exit = events.find((e) => e.name === "exit");
+      expect(exit?.value).toBe(0);
+      expect(typeof stdout?.value).toBe("string");
+      expect(stdout?.value as string).toContain("--- a.txt");
+      expect(stdout?.value as string).toContain("+hello world");
+    });
+
+    it("unknown subcommands exit 1 with a git-shaped stderr line", async () => {
+      const worker = new ShellWorker(undefined as never, envFor(stub) as never);
+      const events = (await drain(
+        (
+          await worker.exec({ command: "git nope", cwd: "/workspace" })
+        ).events,
+      )) as { name: string; value: string | number }[];
+      const stderr = events.find((e) => e.name === "stderr");
+      const exit = events.find((e) => e.name === "exit");
+      expect(stderr?.value).toContain("'nope' is not a supported workspace git command");
+      expect(exit?.value).toBe(1);
+    });
+  });
+
+  // Lightweight structural check that doesn't need a real fs: the
+  // protected extraCommands() hook is invoked and its output is
+  // appended after the built-in git command.
+  describe("`extraCommands` ordering", () => {
+    it("appends extraCommands() output after the built-in git command", async () => {
+      let seen: import("just-bash").CustomCommand[] = [];
+      class WithExtras extends ShellWorker {
+        protected override extraCommands(): import("just-bash").CustomCommand[] {
+          return [
+            { name: "alpha", execute: async () => ({ stdout: "", stderr: "", exitCode: 0 }) },
+            { name: "beta", execute: async () => ({ stdout: "", stderr: "", exitCode: 0 }) },
+          ];
+        }
+      }
+      class TestWithExtras extends WithExtras {
+        static spy() {
+          const w = new TestWithExtras(undefined as never, fakeEnv() as never);
+          w.bashFactoryOverride = async (_cmd, options) => {
+            seen = options.customCommands;
+            return { stdout: "", stderr: "", exitCode: 0 };
+          };
+          return w;
+        }
+      }
+      const worker = TestWithExtras.spy();
+      await drain((await worker.exec({ command: "alpha" })).events);
+      expect(seen.map((c) => c.name)).toEqual(["git", "alpha", "beta"]);
+    });
+  });
 });
+
+// A backend that satisfies Workspace.ready() without exercising
+// the sync or shell wire. Same shape adapter.test.ts uses.
+function noopBackend(): WorkspaceBackend {
+  return {
+    id: "noop",
+    async connect(): Promise<BackendHandle> {
+      return {
+        rpc: {
+          sync: new Proxy(
+            {},
+            {
+              get() {
+                throw new Error("sync wire must not be reached");
+              },
+            },
+          ) as never,
+          shell: new Proxy(
+            {},
+            {
+              get() {
+                throw new Error("shell wire must not be reached");
+              },
+            },
+          ) as never,
+        },
+        sync: "none",
+        close: async () => {},
+      };
+    },
+  };
+}

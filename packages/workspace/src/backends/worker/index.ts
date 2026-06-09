@@ -21,5 +21,6 @@
 export { type WorkspaceFs, WorkspaceFsAdapter } from "./adapter.js";
 export { type ExecInput, ShellWorker, type ShellWorkerOptions } from "./entrypoint.js";
 export { SHELL_BUNDLE } from "./generated-bundle.js";
+export { defineGitCommand, type GitCommandHost } from "./git-command.js";
 export { SHELL_RUNTIME_MODULES } from "./runtime-modules.js";
 export { WorkerBackend, type WorkerBackendOptions, type WorkerShellFetcher } from "./worker.js";

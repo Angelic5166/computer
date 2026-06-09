@@ -16,9 +16,10 @@
 // workspace stub; there's no shared instance state to race.
 
 import { WorkerEntrypoint } from "cloudflare:workers";
-import { Bash } from "just-bash";
+import { Bash, type CustomCommand } from "just-bash";
 
 import { WorkspaceFsAdapter } from "./adapter.js";
+import { defineGitCommand, type GitCommandHost } from "./git-command.js";
 
 export interface ExecInput {
   command: string;
@@ -59,11 +60,12 @@ export interface ShellHostFetcher {
   getWorkspace(): Promise<HostWorkspaceStub>;
 }
 
-// The shape getWorkspace() returns. The shell only touches .fs
-// — the structural subset the adapter consumes. Workers RPC
-// happens to carry this with [Symbol.dispose]; the shell
+// The shape getWorkspace() returns. The shell touches .fs (for
+// the adapter behind every just-bash filesystem call) and .git
+// (for the `git` custom command the shell registers). Workers
+// RPC happens to carry this with [Symbol.dispose]; the shell
 // disposes it after Bash settles.
-export interface HostWorkspaceStub {
+export interface HostWorkspaceStub extends GitCommandHost {
   fs: import("./adapter.js").WorkspaceFs;
   [Symbol.dispose]?: () => void;
 }
@@ -89,12 +91,35 @@ export class ShellWorker<
   // Test seam: when set, exec uses this to spawn the command
   // instead of `new Bash({...}).exec(...)`. Real production
   // paths never touch it.
+  //
+  // The override receives the customCommands list that would
+  // have gone into the Bash constructor so tests can assert on
+  // it directly — the git command is registered here, and a
+  // subclass extraCommands hook would layer onto the same list.
   protected bashFactoryOverride:
     | ((
         command: string,
-        options: { cwd?: string; signal?: AbortSignal },
+        options: {
+          cwd?: string;
+          signal?: AbortSignal;
+          customCommands: CustomCommand[];
+        },
       ) => Promise<{ stdout: string; stderr: string; exitCode: number }>)
     | undefined;
+
+  /**
+   * Subclass hook for registering additional custom commands
+   * alongside the built-in `git` command. Symmetric with
+   * `shellOptions`: the base class returns an empty list and
+   * subclasses override to layer their own commands on top.
+   *
+   * Called once per `exec` with the live host stub the shell
+   * already reached, so subclass commands share that stub's
+   * lifetime without needing to refetch.
+   */
+  protected extraCommands(_ws: HostWorkspaceStub): CustomCommand[] {
+    return [];
+  }
 
   override async fetch(_request: Request): Promise<Response> {
     return new Response(
@@ -111,10 +136,15 @@ export class ShellWorker<
     // execs get two stubs; no instance field, no race.
     const ws = await this.env.HOST.getWorkspace();
 
+    const customCommands: CustomCommand[] = [defineGitCommand(ws), ...this.extraCommands(ws)];
+
     let result: { stdout: string; stderr: string; exitCode: number };
     try {
       if (this.bashFactoryOverride !== undefined) {
-        result = await this.bashFactoryOverride(input.command, { cwd });
+        result = await this.bashFactoryOverride(input.command, {
+          cwd,
+          customCommands,
+        });
       } else {
         const bash = new Bash({
           fs: new WorkspaceFsAdapter(ws.fs) as unknown as NonNullable<
@@ -123,6 +153,7 @@ export class ShellWorker<
           cwd,
           python: this.shellOptions.python,
           javascript: this.shellOptions.javascript,
+          customCommands,
         });
         result = await bash.exec(input.command, { cwd });
       }
