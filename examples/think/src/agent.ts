@@ -18,7 +18,7 @@
  * Phase model:
  *   - The workflow flips `phase` via `setPhase("explore" | "structure")`
  *     before each `step.do` / `step.prompt`. "explore" exposes the
- *     full toolset (read/write/edit/exec/git_clone/ls/report_update);
+ *     full toolset (read/write/edit/exec/ls/report_update);
  *     "structure" hides every tool so the AI-SDK structured-output
  *     path doesn't fight the agentic loop. The phase is persisted to
  *     durable storage so a recovered turn keeps the right tools.
@@ -39,7 +39,6 @@ import {
   withWorkspaceContainer,
 } from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
-import { createGitClient } from "@cloudflare/workspace/git";
 import { type ToolSet, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
@@ -51,7 +50,6 @@ import {
   type WorkspaceLike as FsWorkspaceLike,
   WorkspaceFileStore,
 } from "./tools/fs/index.js";
-import { createGitCloneTool } from "./tools/git/clone.js";
 import { createReportUpdateTool } from "./tools/report-update.js";
 
 // Re-export so the runtime can build loopback bindings the DO
@@ -64,10 +62,13 @@ export { WorkspaceProxy, WorkspaceServiceProxy };
 /**
  * Per-turn phase. The workflow flips this before each model step:
  *
- *   - "explore":   full toolset (read + write + edit + exec + git_clone
- *                 + ls + report_update). The agent decides whether to
- *                 attempt a fix or just gather findings, depending on
- *                 how big the change looks.
+ *   - "explore":   full toolset (read + write + edit + exec + ls +
+ *                 report_update). The agent decides whether to attempt
+ *                 a fix or just gather findings, depending on how
+ *                 big the change looks. Git operations (clone, diff,
+ *                 status) run through `exec` on the shell backend,
+ *                 which registers a built-in `git` command that
+ *                 forwards to the host's `workspace.git.cli(...)`.
  *   - "structure": no tools at all — used by the workflow's tool-less
  *                 `step.prompt` that coerces the explore turn's text
  *                 into the final zod schema. The structured-output
@@ -277,16 +278,14 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
    * didn't change anything or HEAD can't be resolved (e.g. the agent
    * never cloned).
    *
-   * Delegates to `@cloudflare/workspace/git.diff`, which runs
-   * isomorphic-git + the `diff` package over the workspace VFS.
-   * Keeping it as a thin method here (rather than calling the helper
-   * directly from `Triage`) means the workflow code never has to
-   * know about the VFS shape.
+   * Calls `workspace.git.diff` directly rather than going through
+   * the shell backend's `git` command. The workflow needs the diff
+   * text in-band to build the terminal webhook payload, and the
+   * direct call skips a shell round trip.
    */
   async gitDiff(): Promise<string> {
     await this.#workspaceFs.ready();
-    const git = createGitClient({ ws: this.#workspaceFs });
-    return git.diff({ dir: REPO_ROOT });
+    return this.#workspaceFs.git.diff({ dir: REPO_ROOT });
   }
 
   /**
@@ -413,25 +412,35 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
       "It captures the playbook you should follow and the exact shape",
       "of the summary you should produce.",
       "",
-      "Tools available, in preference order. Reach for `exec` last —",
-      "the dedicated tools are faster, give structured output, and",
-      "don't depend on which binaries happen to live in the",
-      "container:",
-      "  - git_clone:     shallow-clone the repository.",
+      "Tools available, in preference order. Reach for `exec` only",
+      "when the dedicated tools can't do what you need:",
       "  - read, ls:      explore the working tree. Prefer these over",
       "                   `exec cat` / `exec ls`.",
       "  - write, edit:   modify files. Prefer these over `exec sed`",
       "                   / `exec tee` / shell heredocs.",
-      "  - exec:          run shell commands. Reserve this for things",
-      "                   the other tools can't do — typically the",
-      "                   project's own tests / typecheck / build",
-      "                   commands (npm test, vitest run, cargo test,",
-      "                   go test, etc.). Do NOT use it for file I/O",
-      "                   that `read` / `ls` / `write` / `edit` cover.",
+      "  - exec:          run shell commands. Use this for `git`",
+      "                   (clone, status, diff, log) on the `shell`",
+      "                   backend, and for the project's own tests /",
+      "                   typecheck / build commands (npm test,",
+      "                   vitest run, cargo test, go test, etc.) on",
+      "                   the `container` backend. Do NOT use it for",
+      "                   file I/O that `read` / `ls` / `write` /",
+      "                   `edit` cover.",
       "  - report_update: progress updates back to the user.",
       "",
+      "Git is built into the `shell` backend. Run",
+      `  exec({ command: "git clone https://github.com/<owner>/<repo> ${REPO_ROOT}", backend: "shell" })`,
+      "to populate the working tree, and `git status` / `git diff` /",
+      "`git log` against the same backend to inspect it. The clone",
+      "runs on the host durable object, so it works despite the",
+      "shell isolate having no network of its own; only https://",
+      "URLs are supported. Pass --depth=<N> if you need more history",
+      "than the default depth=1.",
+      "",
       "Workflow:",
-      "  1. Clone the repo. Read what you need to understand the bug.",
+      `  1. Clone the repo with \`git clone\` via \`exec\` on the`,
+      `     \`shell\` backend into ${REPO_ROOT}.`,
+      "     Read what you need to understand the bug.",
       "  2. Decide: is this a small, well-scoped change you can confidently",
       "     make in a handful of edits, with a way to verify it?",
       "       - YES  -> apply the minimal fix with `write` / `edit`, run the",
@@ -471,7 +480,6 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     const store = new WorkspaceFileStore(adaptToFsWorkspace(this.#workspaceFs));
     const ws = this.#workspaceFs;
     return {
-      git_clone: createGitCloneTool({ ws }),
       // Per-tool caps. Kimi K2.6 has a 262k context window so we
       // don't need to be paranoid; the caps are mostly so a
       // pathological tool call (giant lockfile, multi-MB log) doesn't
@@ -490,17 +498,25 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
               "just-bash in a Dynamic Worker. Cold-start fast, no " +
               "container, no public network. Good for cat / grep / " +
               "sed / awk / jq / head / tail / sort / find / file " +
-              "inspection and quick text transformations. Cannot run " +
-              "git, npm, node, python, or any binary that isn't part " +
-              "of just-bash's built-in command set.",
+              "inspection, quick text transformations, and `git` " +
+              "(clone / status / diff / log / branch / commit) — " +
+              "the shell registers a built-in `git` command that " +
+              "forwards to the host workspace, so network-bound " +
+              "subcommands like `git clone` work even though the " +
+              "isolate itself has no public network. Cannot run " +
+              "npm, node, python, or any binary that isn't part of " +
+              "just-bash's built-in command set.",
           },
           container: {
             description:
               "Cloudflare Container running wsd over capnweb. Full " +
-              "Linux userland: git, npm, node, the test runner, real " +
+              "Linux userland: npm, node, the test runner, real " +
               "binaries on $PATH, public network. Cold start is much " +
               "slower (container boot); reach for it when the shell " +
-              "backend can't run the command.",
+              "backend can't run the command — typically `npm test`, " +
+              "`npm install`, language-specific tooling, or anything " +
+              "that needs a real Linux binary. For git itself, " +
+              "prefer the shell backend.",
           },
         },
         defaultBackend: "shell",

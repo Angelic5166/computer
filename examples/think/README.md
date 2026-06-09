@@ -55,15 +55,14 @@ right phase. `explore` has the full toolset; `structure` has none —
 the model can't be tempted to keep calling tools when its job is to
 just emit JSON.
 
-| Tool            | Source                                    |
-| --------------- | ----------------------------------------- |
-| `git_clone`     | `src/tools/git/clone.ts` (isomorphic-git) |
-| `read`          | vendored from `hackspace/fs-tools`        |
-| `ls`            | `src/agent.ts`                            |
-| `write`         | vendored from `hackspace/fs-tools`        |
-| `edit`          | vendored from `hackspace/fs-tools`        |
-| `exec`          | `src/tools/exec.ts`                       |
-| `report_update` | `src/tools/report-update.ts`              |
+| Tool            | Source                             |
+| --------------- | ---------------------------------- |
+| `read`          | vendored from `hackspace/fs-tools` |
+| `ls`            | `src/agent.ts`                     |
+| `write`         | vendored from `hackspace/fs-tools` |
+| `edit`          | vendored from `hackspace/fs-tools` |
+| `exec`          | `src/tools/exec.ts`                |
+| `report_update` | `src/tools/report-update.ts`       |
 
 `exec` is wired to a Workspace with two backends: a `"shell"`
 backend (just-bash in a Dynamic Worker through `env.LOADER`) and
@@ -71,21 +70,29 @@ a `"container"` backend (Cloudflare Container running `wsd`). The
 shell backend is the default; the tool description tells the model
 which backend each kind of command belongs on, and the model is
 expected to try the cheap shell first and route to the container
-for anything the shell can't run (`npm install`, real `git`, ...).
-See [`docs/05_shell_interface.md`](../../docs/05_shell_interface.md)
+for anything the shell can't run (`npm install`, language-specific
+tooling, ...). See
+[`docs/05_shell_interface.md`](../../docs/05_shell_interface.md)
 for the backend selection model and the cross-backend write
 caveat.
 
-`git_clone` writes to the workspace through a `@platformatic/vfs`
-`VirtualFileSystem` over `Workspace.provider()` — the same `node:fs`-
-shaped surface wsd uses for its FUSE mount. The dofs
-`SQLiteWorkspaceProvider` underneath implements every method
-isomorphic-git asks for, symlinks included, so a clone of e.g.
-`cloudflare/sandbox-sdk` (which has symlinks in its tree) checks
-out cleanly. The clone runs entirely inside the Worker isolate; the
-packfile has to fit in workerd's heap, which is fine for small to
-medium repos at `depth: 1` (the default) but not for huge monorepos.
-No Cloudflare Artifacts binding required.
+Git lives on the shell backend. The worker backend's just-bash
+shell registers a built-in `git` command (see
+[`docs/13_git_interface.md`](../../docs/13_git_interface.md)) that
+forwards every invocation across the loopback to the host's
+`workspace.git.cli(...)`. That means `git clone`, `git status`,
+`git diff`, and friends run from inside `exec({ command: "git ...",
+backend: "shell" })` even though the shell isolate has
+`globalOutbound: null` — the actual HTTP request happens on the
+host durable object, not in the isolate. Only `https://` URLs are
+supported; `ssh://` and `git://` are rejected up front. The clone
+runs at `depth=1` by default; pass `--depth=<N>` for more history.
+
+The workflow itself reaches for the typed git API directly when
+it needs a diff for the terminal webhook payload — see
+`TriageAgent.gitDiff` in `src/agent.ts`, which calls
+`workspace.git.diff` rather than going through `exec`. That skips
+a shell round trip and gives the workflow the diff text in-band.
 
 ## R2-mounted skill
 
@@ -182,4 +189,4 @@ CLI advertises the tunnel hostname instead of its local IP.
   for free.
 - Streaming exec output to a UI; the agent runs each `exec` to
   completion in one tool round.
-- Full `@cloudflare/git-tools` family. Only `git_clone` is vendored.
+
