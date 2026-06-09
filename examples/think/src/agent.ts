@@ -6,7 +6,7 @@
  *     store, agentic loop, workflow integration).
  *   - We additionally own a `@cloudflare/workspace.Workspace` backed
  *     by a Cloudflare Container running `wsd`. Mirrors the pattern
- *     in examples/wsd-container.
+ *     in examples/container.
  *   - Think's own `workspace` field expects a string-based
  *     `WorkspaceLike` for its built-in workspace tools. We satisfy
  *     it with a small adapter over the container workspace and turn
@@ -27,14 +27,18 @@
 import type { StepContext, WorkspaceLike as ThinkWorkspaceLike } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";
 import {
-  CloudflareContainerBackend,
   type DurableObjectStorageLike,
   R2Bucket,
   Workspace,
   WorkspaceProxy,
+  WorkspaceServiceProxy,
   type WorkspaceStub,
-  withWorkspaceContainer,
 } from "@cloudflare/workspace";
+import {
+  CloudflareContainerBackend,
+  withWorkspaceContainer,
+} from "@cloudflare/workspace/backends/container";
+import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { createGitClient } from "@cloudflare/workspace/git";
 import { type ToolSet, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -50,10 +54,12 @@ import {
 import { createGitCloneTool } from "./tools/git/clone.js";
 import { createReportUpdateTool } from "./tools/report-update.js";
 
-// Re-export so the runtime can build a loopback binding for the
-// container egress (ctx.exports.WorkspaceProxy below). Same trick
-// the wsd-container example uses.
-export { WorkspaceProxy };
+// Re-export so the runtime can build loopback bindings the DO
+// uses: WorkspaceProxy carries container egress traffic back to
+// this DO (the wsd /ws upgrade lands here), WorkspaceServiceProxy
+// is the Fetcher the worker backend hands into its Dynamic Worker
+// so the in-isolate shell can reach back to getWorkspace().
+export { WorkspaceProxy, WorkspaceServiceProxy };
 
 /**
  * Per-turn phase. The workflow flips this before each model step:
@@ -133,11 +139,22 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
   override workspaceBash = false;
 
   /**
-   * Container-backed Workspace. Separate from Think's `workspace`
-   * field (which it uses for its built-in tools) — see below.
+   * Two backends on a single Workspace:
+   *
+   *   - "shell" (default) is the WorkerBackend, just-bash in a
+   *     Dynamic Worker. Instant boot, broad textual tooling,
+   *     no container. The exec tool reaches this first.
+   *   - "container" is the CloudflareContainerBackend, wsd over
+   *     capnweb. Full Linux userland; the agent falls through
+   *     to it when the shell can't run the command (network
+   *     binaries like `npm install`, native dependencies, ...).
+   *
+   * The first backend in the list is the workspace default;
+   * `shell.exec(command, { backend: "container" })` routes a
+   * specific call elsewhere.
    */
-  readonly #backend: CloudflareContainerBackend;
-  readonly #containerWs: Workspace;
+  readonly #containerBackend: CloudflareContainerBackend;
+  readonly #workspaceFs: Workspace;
 
   /** Cached context written by the Worker before the workflow runs. */
   #context: TriageContext | null = null;
@@ -147,13 +164,23 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.#backend = new CloudflareContainerBackend({
+    const workspaceRef = { binding: "TriageAgent", id: ctx.id.toString() };
+    this.#containerBackend = new CloudflareContainerBackend({
+      id: "container",
       container: () => this,
-      workspace: { binding: "TriageAgent", id: ctx.id.toString() },
+      workspace: workspaceRef,
     });
-    this.#containerWs = new Workspace({
+    this.#workspaceFs = new Workspace({
       storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [this.#backend],
+      backends: [
+        new WorkerBackend({
+          id: "shell",
+          loader: env.LOADER,
+          workspace: workspaceRef,
+          ctx,
+        }),
+        this.#containerBackend,
+      ],
       // Mount the shared skills bucket at /workspace/.agents. The
       // R2 keys live under `.agents/` (e.g.
       // `.agents/skills/triage/SKILL.md`); the prefix is stripped
@@ -169,8 +196,9 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
 
     // Hand Think an adapter that satisfies its WorkspaceLike, so the
     // baseline read/write/edit tools have something to delegate to —
-    // even though we shadow most of those names below.
-    this.workspace = adaptToThinkWorkspace(this.#containerWs) as unknown as ThinkWorkspaceLike;
+    // even though we shadow most of those names below. Think's
+    // built-in tools land on the default backend (the shell).
+    this.workspace = adaptToThinkWorkspace(this.#workspaceFs) as unknown as ThinkWorkspaceLike;
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context = (await this.ctx.storage.get<TriageContext>(CONTEXT_KEY)) ?? null;
@@ -187,15 +215,15 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     // their own request routing from agents-sdk).
     const url = new URL(request.url);
     if (url.pathname === "/ws") {
-      return this.#backend.handleFetch(request);
+      return this.#containerBackend.handleFetch(request);
     }
     return super.fetch(request);
   }
 
   /** Hand out a typed RPC stub to the workspace if a caller wants one. */
   async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#containerWs.ready();
-    return this.#containerWs.stub();
+    await this.#workspaceFs.ready();
+    return this.#workspaceFs.stub();
   }
 
   // ── Workflow control surface ──────────────────────────────────
@@ -224,7 +252,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     if (!this.#context) {
       throw new Error("setContext() must be called before startTriage()");
     }
-    await this.#containerWs.ready();
+    await this.#workspaceFs.ready();
     return this.runWorkflow("TRIAGE_WORKFLOW", params);
   }
 
@@ -256,8 +284,8 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
    * know about the VFS shape.
    */
   async gitDiff(): Promise<string> {
-    await this.#containerWs.ready();
-    const git = createGitClient({ ws: this.#containerWs });
+    await this.#workspaceFs.ready();
+    const git = createGitClient({ ws: this.#workspaceFs });
     return git.diff({ dir: REPO_ROOT });
   }
 
@@ -440,20 +468,43 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     const phase = this.#phase ?? "explore";
     if (phase === "structure") return {} as ToolSet;
 
-    const store = new WorkspaceFileStore(adaptToFsWorkspace(this.#containerWs));
-    const containerWs = this.#containerWs;
+    const store = new WorkspaceFileStore(adaptToFsWorkspace(this.#workspaceFs));
+    const ws = this.#workspaceFs;
     return {
-      git_clone: createGitCloneTool({ ws: containerWs }),
+      git_clone: createGitCloneTool({ ws }),
       // Per-tool caps. Kimi K2.6 has a 262k context window so we
       // don't need to be paranoid; the caps are mostly so a
       // pathological tool call (giant lockfile, multi-MB log) doesn't
       // burn through the input budget on a single turn. ~32 KiB ≈
       // ~8k tokens per read.
       read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
-      ls: createLsTool(containerWs),
+      ls: createLsTool(ws),
       write: createWriteTool({ store }),
       edit: createEditTool({ store }),
-      exec: createExecTool({ workspace: containerWs, maxBytes: 32 * 1024 }),
+      exec: createExecTool({
+        workspace: ws,
+        maxBytes: 32 * 1024,
+        backends: {
+          shell: {
+            description:
+              "just-bash in a Dynamic Worker. Cold-start fast, no " +
+              "container, no public network. Good for cat / grep / " +
+              "sed / awk / jq / head / tail / sort / find / file " +
+              "inspection and quick text transformations. Cannot run " +
+              "git, npm, node, python, or any binary that isn't part " +
+              "of just-bash's built-in command set.",
+          },
+          container: {
+            description:
+              "Cloudflare Container running wsd over capnweb. Full " +
+              "Linux userland: git, npm, node, the test runner, real " +
+              "binaries on $PATH, public network. Cold start is much " +
+              "slower (container boot); reach for it when the shell " +
+              "backend can't run the command.",
+          },
+        },
+        defaultBackend: "shell",
+      }),
       report_update: createReportUpdateTool({ webhookUrl: ctx.webhookUrl }),
     };
   }

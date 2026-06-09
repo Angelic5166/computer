@@ -11,6 +11,15 @@
 
   "ai": { "binding": "AI" },
 
+  // Worker Loader binding. The TriageAgent's Workspace mounts a
+  // worker backend (just-bash in a Dynamic Worker) alongside the
+  // container backend; the worker backend dials through env.LOADER.
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
+
   "containers": [
     {
       "class_name": "TriageAgent",
@@ -29,7 +38,7 @@
   // the bucket under the `.agents/` prefix.
   // No `preview_bucket_name`: `wrangler dev` and `wrangler deploy`
   // both bind to `think-example-skills`, so the seed scripts only
-  // have one bucket to populate. See examples/wsd-container for the
+  // have one bucket to populate. See examples/container for the
   // same shape and the reasoning.
   "r2_buckets": [
     {

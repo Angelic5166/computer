@@ -65,6 +65,17 @@ just emit JSON.
 | `exec`          | `src/tools/exec.ts`                       |
 | `report_update` | `src/tools/report-update.ts`              |
 
+`exec` is wired to a Workspace with two backends: a `"shell"`
+backend (just-bash in a Dynamic Worker through `env.LOADER`) and
+a `"container"` backend (Cloudflare Container running `wsd`). The
+shell backend is the default; the tool description tells the model
+which backend each kind of command belongs on, and the model is
+expected to try the cheap shell first and route to the container
+for anything the shell can't run (`npm install`, real `git`, ...).
+See [`docs/05_shell_interface.md`](../../docs/05_shell_interface.md)
+for the backend selection model and the cross-backend write
+caveat.
+
 `git_clone` writes to the workspace through a `@platformatic/vfs`
 `VirtualFileSystem` over `Workspace.provider()` — the same `node:fs`-
 shaped surface wsd uses for its FUSE mount. The dofs
@@ -142,8 +153,13 @@ Useful flags:
 The worker is configured in [`wrangler.jsonc`](./wrangler.jsonc):
 
 - `AI` — Workers AI binding (model: `@cf/moonshotai/kimi-k2.6`).
+- `LOADER` — Worker Loader binding. The TriageAgent's Workspace
+  uses it to mint the Dynamic Worker that hosts the `"shell"`
+  backend.
 - `TriageAgent` — container-enabled DO that owns one Workspace + one
-  Think agent per issue.
+  Think agent per issue. The Workspace carries two backends: the
+  worker backend through `env.LOADER` and the container backend
+  through `this.ctx.container`.
 - `TRIAGE_WORKFLOW` — workflow binding pointing at `TriageWorkflow`.
 
 No GitHub auth, no Artifacts. The issue must be on a public

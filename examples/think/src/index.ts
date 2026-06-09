@@ -11,15 +11,19 @@
  * runtime can find them by class name (DO + Workflow bindings in
  * wrangler.jsonc).
  *
- * WorkspaceProxy is also re-exported so the runtime can build the
- * loopback binding the Container backend uses for egress.
+ * WorkspaceProxy and WorkspaceServiceProxy are also re-exported so
+ * the runtime can build the loopback bindings the backends use:
+ * WorkspaceProxy carries container egress traffic back to the
+ * TriageAgent, WorkspaceServiceProxy is the Fetcher the worker
+ * backend hands into its Dynamic Worker so the in-isolate shell
+ * can reach back to getWorkspace().
  */
 
 import { getAgentByName } from "agents";
-import { TriageAgent, WorkspaceProxy } from "./agent.js";
+import { TriageAgent, WorkspaceProxy, WorkspaceServiceProxy } from "./agent.js";
 import { TriageWorkflow } from "./workflow.js";
 
-export { TriageAgent, TriageWorkflow, WorkspaceProxy };
+export { TriageAgent, TriageWorkflow, WorkspaceProxy, WorkspaceServiceProxy };
 
 interface IssueRequest {
   issue_url?: unknown;

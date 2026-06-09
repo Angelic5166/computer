@@ -1,5 +1,5 @@
 # Container image for the think example. Identical wiring to
-# examples/wsd-container — we pull a wsd binary out of the public
+# examples/container — we pull a wsd binary out of the public
 # GHCR image, drop it into a slim debian, and run it as PID 1.
 # The :VERSION tag is rewritten in lockstep with the rest of the
 # monorepo by scripts/set-versions.mjs.
