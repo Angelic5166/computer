@@ -7,8 +7,8 @@
 
 import type { Database } from "@cloudflare/dofs";
 
-// Single table per the "middle-ground" shape in PLAN.md Phase 8:
-// one row per event, kind discriminates stdout/stderr/exit, value
+// Single table, middle-ground shape: one row per event, kind
+// discriminates stdout/stderr/exit, value
 // holds the raw bytes (or a 4-byte LE exit code for kind=2). An
 // auxiliary `wsd_exec_meta` row sticks around after eviction so
 // replay() can distinguish ELOG_TRUNCATED from ENOENT.

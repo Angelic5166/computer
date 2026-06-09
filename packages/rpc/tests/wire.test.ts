@@ -493,8 +493,8 @@ describe("push semantics — external vs sync peer", () => {
       // The push landed: currentRev bumped past 1.
       expect(currentRev(harness.db)).toBeGreaterThan(1);
       // pushRev was NOT advanced. Anything driving the
-      // outbound sync loop (a Phase 6 wsd with UPSTREAM_URL
-      // set) would see the new entry on the next tick.
+      // outbound sync loop (a wsd with UPSTREAM_URL set) would
+      // see the new entry on the next tick.
       expect(readWatermark(harness.db, "pushRev")).toBe(0);
       // fetchRev was NOT advanced either — the sender has
       // no rev space.

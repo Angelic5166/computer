@@ -2,8 +2,8 @@
 // src/test-harness covers the wire end-to-end against a real wsd
 // container; these tests run in-process with a fake WorkspaceRPC so
 // the host-side facade (RPC forwarding, handle shape, encoding,
-// result accumulation, Phase 8.5 bracket math) is exercised without
-// needing Docker.
+// result accumulation, push/pull bracket math) is exercised
+// without needing Docker.
 
 import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "@cloudflare/workspace-rpc";
 import { describe, expect, it } from "vitest";
@@ -492,7 +492,7 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
 });
 
 // ---------------------------------------------------------------------------
-// exec() — Phase 8.5 bracket math
+// exec() — push/pull bracket math
 // ---------------------------------------------------------------------------
 
 describe("WorkspaceShell.exec — push/pull bracket", () => {

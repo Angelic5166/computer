@@ -189,9 +189,11 @@ export interface WorkspaceLike {
 
 /**
  * Identity used as the author/committer fallback when a commit-
- * producing subcommand isn't passed one explicitly. Today this
- * is plumbed through but unused — the typed surface doesn't yet
- * expose `commit`; phase 3 wires it up.
+ * producing subcommand (`commit`, `pull`, `merge`) isn't passed
+ * one explicitly. The precedence is explicit options →
+ * `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env → this fallback. If
+ * none of the three yields a name and email,
+ * `MissingIdentityError` fires.
  */
 export interface GitIdentity {
   name: string;
@@ -276,11 +278,10 @@ export interface CreateGitClientOptions {
   /** Workspace whose provider backs the git operations. */
   ws: WorkspaceLike;
   /**
-   * Default identity used by commit-producing subcommands when
-   * the caller hasn't passed one explicitly and the relevant
-   * `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars are absent. Wired
-   * through here in phase 1 even though no current subcommand
-   * uses it, so the type doesn't churn when `commit` lands.
+   * Default identity used by commit-producing subcommands
+   * (`commit`, `pull`, `merge`) when the caller hasn't passed
+   * one explicitly and the relevant `GIT_AUTHOR_*` /
+   * `GIT_COMMITTER_*` env vars are absent.
    */
   defaultIdentity?: GitIdentity;
   /**

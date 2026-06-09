@@ -191,5 +191,4 @@ examples/container/
 - **One-shot session.** If wsd's WebSocket drops mid-session, the
   cached `BackendHandle` goes stale and the next call throws.
   `Workspace.ready()` will retry on the next call, but in-flight
-  operations are lost. Transparent reconnect is Phase 5 R2
-  deferred work.
+  operations are lost. Transparent reconnect is deferred work.

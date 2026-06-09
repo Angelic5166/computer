@@ -280,10 +280,11 @@ export class WorkspaceExecHandleStub<E extends "utf8" | undefined = undefined> e
 // dispose; the parent `WorkspaceStub` cascades disposal into
 // this one for symmetry with `fs` / `shell`.
 //
-// Phase 1 surfaces only `cli` here. The typed `clone` / `diff`
-// methods stay DO-side; their inputs (progress callbacks,
-// onAuth) don't cross Workers RPC cleanly, and the CLI path
-// covers every consumer who needs git access through a stub.
+// Only `cli` is surfaced across the wire. The typed `clone` /
+// `diff` / `log` / etc. methods stay on the durable-object
+// side; their inputs (progress callbacks, `onAuth`) don't
+// cross Workers RPC cleanly, and the CLI path covers every
+// consumer who needs git access through a stub.
 export class WorkspaceGitStub extends RpcTarget {
   readonly #ws: Workspace;
 

@@ -8,8 +8,8 @@ import type { Database } from "../storage.js";
 // I just sent you" by hash alone.
 //
 // Encoding is JSON for now — readable, debuggable, and structurally
-// identical to casync's `.caidx`. Phase 4 swaps the encoding to the
-// `.caidx` byte layout without a schema change.
+// identical to casync's `.caidx`. A future commit can swap the
+// encoding to the `.caidx` byte layout without a schema change.
 
 export interface ManifestChunk {
   hash: Uint8Array;

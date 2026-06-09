@@ -4,21 +4,14 @@
 // behind the worker-backend's `git` custom command in the shell
 // isolate. Each subcommand has its own flag-table-driven parser
 // and delegates to the same `GitClient` methods the typed surface
-// uses — `cloneWith` / `diffWith` and friends — so the JS API and
-// the CLI surface cannot drift in behaviour.
+// uses — `cloneWith` / `diffWith` / `commitWith` / and friends —
+// so the JS API and the CLI surface cannot drift in behaviour.
 //
-// Phase 1 implements only the subcommands the typed surface
-// already covers (`clone`, `diff`) plus the trivial `help` and
-// `version`. Everything else exits 1 with a stderr line shaped
-// like real git's "'<cmd>' is not a git command" so callers can
-// match on it.
-//
-// Identity defaults are threaded through here as a no-op today
-// (no commit-producing subcommand yet); they read from
-// `input.env.GIT_AUTHOR_*` / `GIT_COMMITTER_*` and fall back to
-// the `defaultIdentity` option threaded through `createGitClient`.
-// Wiring it up in phase 1 keeps the type stable when phase 3
-// lands `commit`.
+// Unknown subcommands exit 1 with a stderr line shaped like real
+// git's "'<cmd>' is not a git command" so callers can match on
+// it. Argv-shape errors (unknown options, missing required
+// values) exit 129. See `docs/13_git_interface.md` for the full
+// list of supported subcommands and their flag mappings.
 
 import {
   AlreadyInitializedError,
@@ -52,27 +45,22 @@ export interface GitCliResult {
 }
 
 export interface RunGitCliOptions {
+  /**
+   * Default identity passed through to commit-producing
+   * subcommands when the caller's env doesn't carry
+   * `GIT_AUTHOR_*` / `GIT_COMMITTER_*`. The CLI itself does not
+   * read this; `runCommit`, `runPull`, and `runMerge` all hand
+   * the value to the underlying `GitClient` method through
+   * `input.env` and the client resolves the precedence.
+   */
   defaultIdentity?: GitIdentity;
-}
-
-// Resolved identity used by commit-producing subcommands. Today
-// nothing reads it; phase 3 will. Keeping the resolver in this
-// file means env / option precedence lives in one place.
-interface ResolvedIdentity {
-  author: GitIdentity | undefined;
-  committer: GitIdentity | undefined;
 }
 
 export async function runGitCli(
   client: GitClient,
   input: GitCliInput,
-  options: RunGitCliOptions = {},
+  _options: RunGitCliOptions = {},
 ): Promise<GitCliResult> {
-  // Resolve identity up front so commit-producing subcommands
-  // (phase 3) see it through a closure. Unused today; the call
-  // keeps `options` live on the dispatcher's surface so the
-  // signature doesn't churn when those subcommands land.
-  void resolveIdentity(input.env, options.defaultIdentity);
   const argv = input.argv;
   if (argv.length === 0) {
     return printHelp();
@@ -99,7 +87,7 @@ export async function runGitCli(
     case "rm":
       return await runRm(client, rest, input);
     case "commit":
-      return await runCommit(client, rest, input, options);
+      return await runCommit(client, rest, input);
     case "log":
       return await runLog(client, rest, input);
     case "show":
@@ -492,7 +480,6 @@ async function runCommit(
   client: GitClient,
   args: string[],
   input: GitCliInput,
-  _options: RunGitCliOptions,
 ): Promise<GitCliResult> {
   // `git commit -m <msg> [--amend] [--author="Name <email>"]`
   const parsed = parseFlags(args, {
@@ -1777,30 +1764,4 @@ function isSupportedRemoteUrl(url: string): boolean {
 function errorMessage(cause: unknown): string {
   if (cause instanceof Error) return cause.message;
   return String(cause);
-}
-
-// Exposed for symmetry with future commit-producing subcommands.
-// Unused today but threaded through `runGitCli` so the env / option
-// precedence lives in one place.
-export function resolveIdentity(
-  env: Record<string, string> | undefined,
-  fallback: GitIdentity | undefined,
-): ResolvedIdentity {
-  const e = env ?? {};
-  const author = pickIdentity(e.GIT_AUTHOR_NAME, e.GIT_AUTHOR_EMAIL, fallback);
-  const committer = pickIdentity(
-    e.GIT_COMMITTER_NAME ?? e.GIT_AUTHOR_NAME,
-    e.GIT_COMMITTER_EMAIL ?? e.GIT_AUTHOR_EMAIL,
-    fallback,
-  );
-  return { author, committer };
-}
-
-function pickIdentity(
-  name: string | undefined,
-  email: string | undefined,
-  fallback: GitIdentity | undefined,
-): GitIdentity | undefined {
-  if (name && email) return { name, email };
-  return fallback;
 }

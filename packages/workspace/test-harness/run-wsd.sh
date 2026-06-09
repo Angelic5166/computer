@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boots a wsd container under FUSE and prints the host URL.
 #
-# Used by the Phase 7 vitest harness to give TestBackend a
+# Used by the vitest harness to give TestBackend a
 # real wsd to talk to. The harness sets WSD_HARNESS_URL from
 # this script's stdout, then runs the workerd-backed test
 # against the URL.

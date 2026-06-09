@@ -21,7 +21,7 @@ const COVERAGE: Record<WireErrorCode, string> = {
   EUNKNOWN_HASH: "workspace:WorkspaceFs#assembleChunks throws when fetchObjects skipped a hash.",
   ESHUTDOWN:
     "TBD — wsd shutdown path will raise this when the runner refuses new exec after disposeAll.",
-  EAUTH: "TBD — wired when WSD_AUTH_TOKEN handshake lands (Phase 7 W3).",
+  EAUTH: "TBD — wired when the WSD_AUTH_TOKEN handshake lands.",
   EPROTOCOL:
     "TBD — wired when frame-size / version-mismatch enforcement lands (docs/08 open question).",
   EEXEC_BUSY:

@@ -200,7 +200,8 @@ async function listFilesAt(
 function makePathFilter(paths: string[] | undefined): (p: string) => boolean {
   if (paths === undefined || paths.length === 0) return () => true;
   // Match either an exact path or a directory prefix. Globs are
-  // not supported; document this in phase 4.
+  // not supported on this surface; the docs call this out
+  // explicitly under the `diff` command reference.
   const exact = new Set(paths.map((p) => normalizePath(p)));
   const prefixes = [...exact].map((p) => `${p}/`);
   return (candidate) => {

@@ -3,8 +3,9 @@
 // until the workspace-rpc surface (E2) picks them up.
 //
 // Every event carries a per-id monotonic `seq`. Resume math
-// (`getExec({ after })`) is integer comparisons; see PLAN.md
-// Phase 8 for the seq vs timestamp discussion.
+// (`getExec({ after })`) is integer comparisons — a monotonic
+// counter rather than a wall-clock timestamp avoids clock-skew
+// and same-millisecond ordering issues.
 
 export type ExecEvent =
   | { id: string; seq: number; name: "stdout"; value: Uint8Array }
