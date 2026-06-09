@@ -48,6 +48,14 @@ import type {
   RemoteView,
 } from "./network.js";
 import type {
+  CatFileResult,
+  GitCatFileOptions,
+  GitConfigGetOptions,
+  GitConfigSetOptions,
+  GitHashObjectOptions,
+  GitUpdateRefOptions,
+} from "./plumbing.js";
+import type {
   CommitView,
   GitCurrentBranchOptions,
   GitLogOptions,
@@ -97,6 +105,11 @@ interface FakeCalls {
   remoteAdd: GitRemoteAddOptions[];
   remoteRemove: GitRemoteRemoveOptions[];
   remoteList: GitRemoteListOptions[];
+  hashObject: GitHashObjectOptions[];
+  catFile: GitCatFileOptions[];
+  updateRef: GitUpdateRefOptions[];
+  configGet: GitConfigGetOptions[];
+  configSet: GitConfigSetOptions[];
 }
 
 function fakeClient(
@@ -115,6 +128,9 @@ function fakeClient(
     merge?: () => MergeResult;
     fetch?: () => FetchResult;
     remoteList?: () => RemoteView[];
+    hashObject?: () => string;
+    catFile?: () => CatFileResult;
+    configGet?: () => string | string[] | undefined;
   } = {},
 ): {
   client: GitClient;
@@ -148,6 +164,11 @@ function fakeClient(
     remoteAdd: [],
     remoteRemove: [],
     remoteList: [],
+    hashObject: [],
+    catFile: [],
+    updateRef: [],
+    configGet: [],
+    configSet: [],
   };
   const client: GitClient = {
     async clone(options) {
@@ -254,6 +275,29 @@ function fakeClient(
     async remoteList(options = {}) {
       calls.remoteList.push(options);
       return fakes.remoteList?.() ?? [];
+    },
+    async hashObject(options) {
+      calls.hashObject.push(options);
+      return fakes.hashObject?.() ?? "a".repeat(40);
+    },
+    async catFile(options) {
+      calls.catFile.push(options);
+      return (
+        fakes.catFile?.() ?? {
+          oid: "a".repeat(40),
+          bytes: new TextEncoder().encode(""),
+        }
+      );
+    },
+    async updateRef(options) {
+      calls.updateRef.push(options);
+    },
+    async configGet(options) {
+      calls.configGet.push(options);
+      return fakes.configGet?.();
+    },
+    async configSet(options) {
+      calls.configSet.push(options);
     },
     async cli() {
       throw new Error("not reached in these tests");
@@ -1190,6 +1234,169 @@ describe("runGitCli — remote argv parsing", () => {
   });
 });
 
+describe("runGitCli — hash-object", () => {
+  it("--stdin hashes the input stdin", async () => {
+    const { client, calls } = fakeClient({}, { hashObject: () => "d".repeat(40) });
+    const res = await runGitCli(client, {
+      argv: ["hash-object", "--stdin"],
+      cwd: "/r",
+      stdin: "hello\n",
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe(`${"d".repeat(40)}\n`);
+    expect(calls.hashObject).toEqual([{ dir: "/r", content: "hello\n", write: false }]);
+  });
+
+  it("-w writes the blob", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, {
+      argv: ["hash-object", "-w", "--stdin"],
+      stdin: "x",
+    });
+    expect(calls.hashObject[0].write).toBe(true);
+  });
+
+  it("without --stdin is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["hash-object"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("only --stdin is supported");
+  });
+});
+
+describe("runGitCli — cat-file", () => {
+  it("-p <oid> reads the object's bytes", async () => {
+    const { client, calls } = fakeClient(
+      {},
+      {
+        catFile: () => ({
+          oid: "a".repeat(40),
+          bytes: new TextEncoder().encode("hello\n"),
+        }),
+      },
+    );
+    const res = await runGitCli(client, {
+      argv: ["cat-file", "-p", "a".repeat(40)],
+      cwd: "/r",
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("hello\n");
+    expect(calls.catFile).toEqual([{ dir: "/r", oid: "a".repeat(40), filepath: undefined }]);
+  });
+
+  it("-p <oid>:<path> reads a tree subpath", async () => {
+    const { client, calls } = fakeClient(
+      {},
+      {
+        catFile: () => ({
+          oid: "a".repeat(40),
+          bytes: new TextEncoder().encode("world\n"),
+        }),
+      },
+    );
+    await runGitCli(client, {
+      argv: ["cat-file", "-p", `${"a".repeat(40)}:a.txt`],
+    });
+    expect(calls.catFile[0]).toMatchObject({
+      oid: "a".repeat(40),
+      filepath: "a.txt",
+    });
+  });
+
+  it("without -p is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["cat-file", "a".repeat(40)] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("only -p is supported");
+  });
+});
+
+describe("runGitCli — update-ref", () => {
+  it("writes <ref> <value> through to the client", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, {
+      argv: ["update-ref", "refs/heads/main", "a".repeat(40)],
+      cwd: "/r",
+    });
+    expect(res.exitCode).toBe(0);
+    expect(calls.updateRef).toEqual([
+      {
+        dir: "/r",
+        ref: "refs/heads/main",
+        value: "a".repeat(40),
+        force: false,
+      },
+    ]);
+  });
+
+  it("--force flips the option", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, {
+      argv: ["update-ref", "--force", "refs/heads/main", "a".repeat(40)],
+    });
+    expect(calls.updateRef[0].force).toBe(true);
+  });
+
+  it("missing arguments is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["update-ref", "refs/heads/main"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("usage");
+  });
+});
+
+describe("runGitCli — config", () => {
+  it("`config <key>` returns the value", async () => {
+    const { client } = fakeClient({}, { configGet: () => "test@x" });
+    const res = await runGitCli(client, { argv: ["config", "user.email"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("test@x\n");
+  });
+
+  it("`config <key>` on missing key exits 1", async () => {
+    const { client } = fakeClient({}, { configGet: () => undefined });
+    const res = await runGitCli(client, { argv: ["config", "missing.key"] });
+    expect(res.exitCode).toBe(1);
+    expect(res.stdout).toBe("");
+  });
+
+  it("`config --get-all <key>` returns multi-valued output", async () => {
+    const { client, calls } = fakeClient({}, { configGet: () => ["a", "b"] });
+    const res = await runGitCli(client, {
+      argv: ["config", "--get-all", "remote.origin.fetch"],
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("a\nb\n");
+    expect(calls.configGet[0].all).toBe(true);
+  });
+
+  it("`config <key> <value>` sets", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, {
+      argv: ["config", "user.email", "a@x"],
+      cwd: "/r",
+    });
+    expect(res.exitCode).toBe(0);
+    expect(calls.configSet).toEqual([
+      { dir: "/r", path: "user.email", value: "a@x", append: false },
+    ]);
+  });
+
+  it("`config --add <key> <value>` appends to a multi-valued key", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, {
+      argv: ["config", "--add", "remote.origin.fetch", "refs/heads/*"],
+    });
+    expect(calls.configSet[0].append).toBe(true);
+  });
+
+  it("`config --unset <key>` unsets", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["config", "--unset", "user.email"] });
+    expect(calls.configSet[0].value).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------
 // End-to-end: real Workspace + real isomorphic-git/diff, faked
 // clone phase. Matches the pattern in clone.test.ts.
@@ -1305,6 +1512,46 @@ describe("runGitCli — end-to-end against an in-process Workspace", () => {
     const lsFiles = await cli(["ls-files"]);
     expect(lsFiles.exitCode).toBe(0);
     expect(lsFiles.stdout).toBe("a.txt\n");
+  });
+
+  it("hash-object / cat-file / update-ref / config round-trip", async () => {
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      defaultGitIdentity: { name: "Test", email: "test@example.test" },
+    });
+    await ws.ready();
+    const cli = (argv: string[], opts: { stdin?: string } = {}) =>
+      ws.git.cli({ argv, cwd: "/", stdin: opts.stdin });
+    await cli(["init"]);
+
+    // hash-object -w --stdin writes a blob and prints its oid.
+    const hashed = await cli(["hash-object", "-w", "--stdin"], { stdin: "hello\n" });
+    expect(hashed.exitCode).toBe(0);
+    const oid = hashed.stdout.trim();
+    expect(oid).toMatch(/^[0-9a-f]{40}$/);
+
+    // cat-file -p reads the same bytes back.
+    const read = await cli(["cat-file", "-p", oid]);
+    expect(read.exitCode).toBe(0);
+    expect(read.stdout).toBe("hello\n");
+
+    // config set + get round-trip.
+    expect((await cli(["config", "user.name", "Test User"])).exitCode).toBe(0);
+    const got = await cli(["config", "user.name"]);
+    expect(got.exitCode).toBe(0);
+    expect(got.stdout).toBe("Test User\n");
+
+    // Make a commit so we have an oid to point a ref at.
+    await ws.fs.writeFile("/a.txt", "hi\n");
+    await cli(["add", "a.txt"]);
+    await cli(["commit", "-m", "init"]);
+    const headRes = await cli(["rev-parse", "HEAD"]);
+    const head = headRes.stdout.trim();
+
+    // update-ref moves a custom ref to HEAD.
+    expect((await cli(["update-ref", "refs/custom/x", head])).exitCode).toBe(0);
+    const custom = await cli(["rev-parse", "refs/custom/x"]);
+    expect(custom.stdout.trim()).toBe(head);
   });
 
   it("remote add / list / remove round-trip through the config file", async () => {

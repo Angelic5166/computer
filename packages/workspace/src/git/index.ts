@@ -61,6 +61,20 @@ import {
   remoteRemoveWith,
 } from "./network.js";
 import {
+  type CatFileResult,
+  catFileWith,
+  configGetWith,
+  configSetWith,
+  type GitCatFileOptions,
+  type GitConfigGetOptions,
+  type GitConfigSetOptions,
+  type GitHashObjectOptions,
+  type GitUpdateRefOptions,
+  hashObjectWith,
+  type IsomorphicGitPlumbingClient,
+  updateRefWith,
+} from "./plumbing.js";
+import {
   type CommitView,
   currentBranchWith,
   type GitCurrentBranchOptions,
@@ -138,6 +152,14 @@ export type {
   RefUpdateStatus,
   RemoteView,
 } from "./network.js";
+export type {
+  CatFileResult,
+  GitCatFileOptions,
+  GitConfigGetOptions,
+  GitConfigSetOptions,
+  GitHashObjectOptions,
+  GitUpdateRefOptions,
+} from "./plumbing.js";
 export type {
   CommitView,
   GitCurrentBranchOptions,
@@ -232,6 +254,16 @@ export interface GitClient {
   remoteRemove(options: GitRemoteRemoveOptions): Promise<void>;
   /** List configured remotes. */
   remoteList(options?: GitRemoteListOptions): Promise<RemoteView[]>;
+  /** Hash bytes as a blob; optionally write into the object store. */
+  hashObject(options: GitHashObjectOptions): Promise<string>;
+  /** Read raw bytes for an object by oid. */
+  catFile(options: GitCatFileOptions): Promise<CatFileResult>;
+  /** Write a ref directly. */
+  updateRef(options: GitUpdateRefOptions): Promise<void>;
+  /** Read a single config key. */
+  configGet(options: GitConfigGetOptions): Promise<string | string[] | undefined>;
+  /** Write a single config key. */
+  configSet(options: GitConfigSetOptions): Promise<void>;
   /**
    * Argv-driven entry point. The worker-backend's `git` custom
    * command dispatches through this; in-process callers can use
@@ -523,6 +555,42 @@ export function createGitClient({
         ...options,
         fs: await fs(),
         git: await loadGit<IsomorphicGitNetworkClient>(),
+      });
+    },
+    async hashObject(options) {
+      return hashObjectWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitPlumbingClient>(),
+      });
+    },
+    async catFile(options) {
+      return catFileWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitPlumbingClient>(),
+        cache,
+      });
+    },
+    async updateRef(options) {
+      return updateRefWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitPlumbingClient>(),
+      });
+    },
+    async configGet(options) {
+      return configGetWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitPlumbingClient>(),
+      });
+    },
+    async configSet(options) {
+      return configSetWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitPlumbingClient>(),
       });
     },
     async cli(input) {

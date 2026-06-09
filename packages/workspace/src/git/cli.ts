@@ -128,6 +128,14 @@ export async function runGitCli(
       return await runMerge(client, rest, input);
     case "remote":
       return await runRemote(client, rest, input);
+    case "hash-object":
+      return await runHashObject(client, rest, input);
+    case "cat-file":
+      return await runCatFile(client, rest, input);
+    case "update-ref":
+      return await runUpdateRef(client, rest, input);
+    case "config":
+      return await runConfig(client, rest, input);
     default:
       return {
         stdout: "",
@@ -148,11 +156,14 @@ function printHelp(): GitCliResult {
     "Supported workspace git commands:",
     "   add           Stage paths into the index.",
     "   branch        Create, delete, or list branches.",
+    "   cat-file      Read raw bytes for an object by oid.",
     "   checkout      Move HEAD to a ref, or restore paths.",
     "   clone         Clone a remote repository into the workspace.",
     "   commit        Write the current index to a new commit.",
+    "   config        Read or write a config key.",
     "   diff          Show changes between HEAD and the working tree.",
     "   fetch         Fetch refs from a remote.",
+    "   hash-object   Hash bytes as a blob (optionally write).",
     "   init          Initialise a new repository.",
     "   log           List commits reachable from HEAD.",
     "   ls-files      List files in the index (or at a ref).",
@@ -167,6 +178,7 @@ function printHelp(): GitCliResult {
     "   status        Describe the working-tree / index / HEAD delta.",
     "   symbolic-ref  Print the current branch name.",
     "   tag           Create, delete, or list tags.",
+    "   update-ref    Write a ref directly.",
     "   help          Show this help.",
     "   version       Print the workspace git wrapper version.",
     "",
@@ -1374,6 +1386,225 @@ async function runRemote(
         exitCode: 129,
       };
   }
+}
+
+// ---------------------------------------------------------------
+// hash-object
+// ---------------------------------------------------------------
+
+async function runHashObject(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git hash-object [-w] --stdin` -- the only mode we cover.
+  // The on-disk file path form (`git hash-object <file>`) would
+  // pull in path resolution and a Uint8Array readback through
+  // the workspace's fs; the stdin form is enough for the agent
+  // scripts that drive the shell side.
+  const parsed = parseFlags(args, {
+    w: { kind: "bool" },
+    stdin: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return {
+      stdout: "",
+      stderr: `git hash-object: ${parsed.error}\n`,
+      exitCode: 129,
+    };
+  }
+  if (parsed.flags.stdin !== true) {
+    return {
+      stdout: "",
+      stderr: "git hash-object: only --stdin is supported\n",
+      exitCode: 129,
+    };
+  }
+  if (parsed.positional.length > 0) {
+    return {
+      stdout: "",
+      stderr: `git hash-object: unexpected argument '${parsed.positional[0]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const oid = await client.hashObject({
+      dir,
+      content: input.stdin ?? "",
+      write: parsed.flags.w === true,
+    });
+    return { stdout: `${oid}\n`, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("hash-object", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// cat-file
+// ---------------------------------------------------------------
+
+async function runCatFile(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git cat-file -p <oid>` -- pretty-print the object's raw
+  // bytes to stdout. Other forms (`-t`, `-s`) are out of scope.
+  const parsed = parseFlags(args, {
+    p: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git cat-file: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.flags.p !== true) {
+    return {
+      stdout: "",
+      stderr: "git cat-file: only -p is supported\n",
+      exitCode: 129,
+    };
+  }
+  if (parsed.positional.length !== 1) {
+    return {
+      stdout: "",
+      stderr: "git cat-file: usage: git cat-file -p <oid>[:<path>]\n",
+      exitCode: 129,
+    };
+  }
+  // Support the <oid>:<path> shorthand for tree subreads.
+  const spec = parsed.positional[0];
+  const colon = spec.indexOf(":");
+  const oid = colon === -1 ? spec : spec.slice(0, colon);
+  const filepath = colon === -1 ? undefined : spec.slice(colon + 1);
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const result = await client.catFile({ dir, oid, filepath });
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(result.bytes);
+    return { stdout: text, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("cat-file", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// update-ref
+// ---------------------------------------------------------------
+
+async function runUpdateRef(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git update-ref [--force] <ref> <value>` -- direct ref
+  // write. The older `--symbolic` and the read-side `-d` are
+  // out of scope for this surface.
+  const parsed = parseFlags(args, {
+    force: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return {
+      stdout: "",
+      stderr: `git update-ref: ${parsed.error}\n`,
+      exitCode: 129,
+    };
+  }
+  if (parsed.positional.length !== 2) {
+    return {
+      stdout: "",
+      stderr: "git update-ref: usage: git update-ref [--force] <ref> <value>\n",
+      exitCode: 129,
+    };
+  }
+  const [ref, value] = parsed.positional;
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    await client.updateRef({ dir, ref, value, force: parsed.flags.force === true });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("update-ref", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// config
+// ---------------------------------------------------------------
+
+async function runConfig(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git config <key>`              -> get
+  // `git config --get-all <key>`    -> get all values
+  // `git config <key> <value>`      -> set
+  // `git config --add <key> <value>`-> append multi-valued
+  // `git config --unset <key>`      -> unset
+  const parsed = parseFlags(args, {
+    get: { kind: "bool" },
+    "get-all": { kind: "bool" },
+    add: { kind: "bool" },
+    unset: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git config: ${parsed.error}\n`, exitCode: 129 };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  const getAll = parsed.flags["get-all"] === true;
+  const wantUnset = parsed.flags.unset === true;
+  const wantAdd = parsed.flags.add === true;
+
+  if (wantUnset) {
+    if (parsed.positional.length !== 1) {
+      return {
+        stdout: "",
+        stderr: "git config: usage: git config --unset <key>\n",
+        exitCode: 129,
+      };
+    }
+    try {
+      await client.configSet({ dir, path: parsed.positional[0], value: undefined });
+      return { stdout: "", stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("config", cause);
+    }
+  }
+
+  if (parsed.positional.length === 1) {
+    // Get mode.
+    try {
+      const value = await client.configGet({
+        dir,
+        path: parsed.positional[0],
+        all: getAll,
+      });
+      if (value === undefined) {
+        // Real git exits 1 with no output when --get misses.
+        return { stdout: "", stderr: "", exitCode: 1 };
+      }
+      const text = Array.isArray(value) ? `${value.join("\n")}\n` : `${value}\n`;
+      return { stdout: text, stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("config", cause);
+    }
+  }
+
+  if (parsed.positional.length === 2) {
+    const [path, value] = parsed.positional;
+    try {
+      await client.configSet({ dir, path, value, append: wantAdd });
+      return { stdout: "", stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("config", cause);
+    }
+  }
+
+  // Used input directly; ignore unused.
+  void input;
+  return {
+    stdout: "",
+    stderr: "git config: usage: git config [--get-all|--add|--unset] <key> [<value>]\n",
+    exitCode: 129,
+  };
 }
 
 // ---------------------------------------------------------------
