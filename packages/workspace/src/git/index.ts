@@ -1,11 +1,19 @@
 // Public surface of @cloudflare/workspace/git.
 //
 // `createGitClient({ ws })` is the one entry point. It binds a
-// workspace handle once and returns `{ clone, diff }` methods that
-// don't repeat the workspace argument. Internally each method
-// lazy-loads its optional peer deps (`isomorphic-git`, the http
-// transport, and for `diff` the `diff` package) and delegates to
-// `cloneWith` / `diffWith`.
+// workspace handle once and returns a `GitClient` whose methods
+// don't repeat the workspace argument. Today the typed surface is
+// `clone` and `diff`; `cli` is the argv-driven door into the same
+// implementations, used by the worker-backend's `git` custom
+// command in the shell isolate.
+//
+// Internally each method lazy-loads its optional peer deps
+// (`isomorphic-git`, the http transport, and for `diff` the
+// `diff` package) and delegates to `cloneWith` / `diffWith`. The
+// loaders are memoised on the client so the dynamic imports fire
+// once across the lifetime of the client — without that, the CLI
+// would multiply the cost (re-importing isomorphic-git on every
+// dispatch) and even the existing JS surface re-imported per call.
 //
 // `cloneWith` and `diffWith` are still exported for callers that
 // bring their own FsClient — tests, custom adapters, running
@@ -15,6 +23,7 @@
 import type { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 
 import { type IsomorphicGitFSClient, workspaceIsomorphicGitClient } from "./adapter.js";
+import { type GitCliInput, type GitCliResult, runGitCli } from "./cli.js";
 import { cloneWith, type GitCloneOptions, type IsomorphicGitClient } from "./clone.js";
 import {
   type CreatePatchFn,
@@ -24,6 +33,7 @@ import {
   type ReadFileFn,
 } from "./diff.js";
 
+export type { GitCliInput, GitCliResult } from "./cli.js";
 export type { GitCloneOptions, MessageCallback, ProgressCallback } from "./clone.js";
 export type { GitDiffOptions, StatusRow } from "./diff.js";
 
@@ -32,17 +42,44 @@ export interface WorkspaceLike {
   provider(): SQLiteWorkspaceProvider;
 }
 
+/**
+ * Identity used as the author/committer fallback when a commit-
+ * producing subcommand isn't passed one explicitly. Today this
+ * is plumbed through but unused — the typed surface doesn't yet
+ * expose `commit`; phase 3 wires it up.
+ */
+export interface GitIdentity {
+  name: string;
+  email: string;
+}
+
 /** Methods returned by `createGitClient`. */
 export interface GitClient {
   /** Shallow-clone a remote into the bound workspace. */
   clone(options: GitCloneOptions): Promise<void>;
   /** Unified diff between a ref (default HEAD) and the working tree. */
   diff(options?: GitDiffOptions): Promise<string>;
+  /**
+   * Argv-driven entry point. The worker-backend's `git` custom
+   * command dispatches through this; in-process callers can use
+   * it too when they want CLI-shaped output. The supported
+   * subcommands today mirror the typed surface (`clone`, `diff`)
+   * plus the trivial `help` and `version`.
+   */
+  cli(input: GitCliInput): Promise<GitCliResult>;
 }
 
 export interface CreateGitClientOptions {
   /** Workspace whose provider backs the git operations. */
   ws: WorkspaceLike;
+  /**
+   * Default identity used by commit-producing subcommands when
+   * the caller hasn't passed one explicitly and the relevant
+   * `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env vars are absent. Wired
+   * through here in phase 1 even though no current subcommand
+   * uses it, so the type doesn't churn when `commit` lands.
+   */
+  defaultIdentity?: GitIdentity;
   /**
    * Test seam for substituting the @platformatic/vfs adapter.
    * Production callers do not pass this.
@@ -64,9 +101,15 @@ export interface CreateGitClientOptions {
  * from the SQLite-backed VFS — fine for tiny repos, catastrophic
  * for anything with a real history (the difference between a
  * sub-second `diff` and one that hangs for minutes).
+ *
+ * The dynamic imports for `isomorphic-git`, its HTTP transport,
+ * and the `diff` package are memoised on the client too. The
+ * first method call pays the cost; every subsequent call (typed
+ * or CLI) reuses the resolved modules.
  */
 export function createGitClient({
   ws,
+  defaultIdentity,
   adapter = workspaceIsomorphicGitClient,
 }: CreateGitClientOptions): GitClient {
   let fsPromise: Promise<IsomorphicGitFSClient> | undefined;
@@ -76,13 +119,33 @@ export function createGitClient({
   };
   const cache: Record<string, unknown> = {};
 
-  return {
+  // Memoised module loaders. Each holds the promise returned by
+  // the dynamic import so concurrent first-use callers share one
+  // import pass, and subsequent callers reuse the resolved module
+  // synchronously through the cached promise.
+  let gitPromise: Promise<unknown> | undefined;
+  let httpPromise: Promise<object> | undefined;
+  let createPatchPromise: Promise<CreatePatchFn> | undefined;
+  const loadGit = <T>(): Promise<T> => {
+    if (!gitPromise) gitPromise = loadIsomorphicGit();
+    return gitPromise as Promise<T>;
+  };
+  const loadHttp = (): Promise<object> => {
+    if (!httpPromise) httpPromise = loadDefaultHTTP();
+    return httpPromise;
+  };
+  const loadDiffPatch = (): Promise<CreatePatchFn> => {
+    if (!createPatchPromise) createPatchPromise = loadCreatePatch();
+    return createPatchPromise;
+  };
+
+  const client: GitClient = {
     async clone(options) {
       await cloneWith({
         ...options,
         fs: await fs(),
-        git: await loadIsomorphicGit<IsomorphicGitClient>(),
-        http: await loadDefaultHTTP(),
+        git: await loadGit<IsomorphicGitClient>(),
+        http: await loadHttp(),
         cache,
       });
     },
@@ -91,18 +154,22 @@ export function createGitClient({
       return diffWith({
         ...options,
         fs: f,
-        git: await loadIsomorphicGit<IsomorphicGitDiffClient>(),
-        createPatch: await loadCreatePatch(),
+        git: await loadGit<IsomorphicGitDiffClient>(),
+        createPatch: await loadDiffPatch(),
         readFile: readFileFrom(f),
         cache,
       });
     },
+    async cli(input) {
+      return runGitCli(client, input, { defaultIdentity });
+    },
   };
+  return client;
 }
 
 // isomorphic-git ships both named exports and a default export
 // (CJS interop). Callers pull the subset they need via the generic.
-async function loadIsomorphicGit<T>(): Promise<T> {
+async function loadIsomorphicGit<T = unknown>(): Promise<T> {
   try {
     const mod = await import("isomorphic-git");
     return (mod.default ?? mod) as unknown as T;
