@@ -231,6 +231,7 @@ above, then dive into the area you're working on.
 | [10. Project Layout](./10_project_layout.md) | Source tree of this package and how the pieces fit together. |
 | [11. Lifecycle](./11_lifecycle.md) | DO incarnations, container lifetime, capnweb session lifecycle, and hibernation. |
 | [12. Worker backend](./12_worker_backend.md) | Running the shell as just-bash inside a Dynamic Worker loaded through `env.LOADER`. |
+| [13. Git interface](./13_git_interface.md) | `workspace.git` and the `git` CLI inside the shell, backed by isomorphic-git. |
 
 ## High-level API
 

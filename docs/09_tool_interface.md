@@ -4,12 +4,16 @@
 > The `@cloudflare/fs-tools` package described here is **not yet
 > implemented**. The substrate (`workspace.fs.*`, `workspace.shell.exec`)
 > is in place; only the AI-SDK wrappers and the `FileStore` abstraction
-> are missing. This doc remains the design target; implementation is
-> tracked in `PLAN.md` as an Important item.
+> are missing. This doc remains the design target.
 >
-> A sibling package `@cloudflare/git-tools` (clone / branch / diff) is
-> planned with the same shape and will be documented alongside this one
-> once both land.
+> Git access already ships through `workspace.git`, the third major
+> surface on `Workspace` alongside `fs` and `shell`. The original plan
+> was a sibling `@cloudflare/git-tools` package, but the typed and
+> argv-driven APIs (`workspace.git.clone(...)`,
+> `workspace.git.cli({ argv })`) live in `@cloudflare/workspace/git`
+> today. AI-SDK tool wrappers around that surface can land later
+> against a stable target. See
+> [`13_git_interface.md`](./13_git_interface.md).
 
 The `@cloudflare/fs-tools` package ships ready-made
 [AI SDK](https://github.com/vercel/ai) tools that drive a `Workspace`

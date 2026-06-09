@@ -45,6 +45,13 @@ uniform; the counts are just always zero.
 - `WorkspaceShell` / `ExecHandle` — the command-execution half of
   the API. Throws a clear error if the Workspace was constructed
   without a backend.
+- `workspace.git` — a typed git client backed by
+  `isomorphic-git` against the local SQLite VFS. Surfaces both a
+  TypeScript API (`workspace.git.clone({ url })`) and an
+  argv-driven entry point (`workspace.git.cli({ argv })`). The
+  worker backend's shell exposes the same dispatcher through a
+  built-in `git` custom command. See
+  [`docs/13_git_interface.md`](../../docs/13_git_interface.md).
 
 ## Typical DO-side usage
 
@@ -115,6 +122,25 @@ await ws.fs.writeFile("/notes.md", "hello");
 const body = await ws.fs.readFile("/notes.md", "utf8");
 // ws.shell throws — there's no backend wired up.
 ```
+
+Git, also without a backend:
+
+```ts
+const ws = new Workspace({
+  storage: ctx.storage,
+  defaultGitIdentity: { name: "Agent", email: "agent@example.test" },
+});
+await ws.git.clone({ url: "https://github.com/example/repo.git" });
+await ws.fs.writeFile("/notes.md", "hello");
+await ws.git.add({ paths: ["notes.md"] });
+await ws.git.commit({ message: "add notes" });
+const log = await ws.git.log({ depth: 1 });
+```
+
+Every `workspace.git` operation reads and writes through the
+local store; no backend or shell is required. See the doc
+above for the full method surface, error hierarchy, and CLI
+shape.
 
 ## Multiple backends per workspace
 
@@ -252,10 +278,10 @@ The minimum a caller needs to know:
 
 - `using` the value returned from `env.WSD.get(id).getWorkspace()`.
 - `using` the handle returned from `ws.shell.exec(...)`.
-- Don't worry about `ws.fs` / `ws.shell` — those are property
-  accessors that ride with the parent.
+- Don't worry about `ws.fs`, `ws.shell`, or `ws.git` — those are
+  property accessors that ride with the parent.
 - Pure-value returns (`readFile` as a string, `stat`, `readdir`,
-  etc.) carry no stubs; nothing to dispose.
+  `git.cli({...})`, etc.) carry no stubs; nothing to dispose.
 
 Short-lived single-shot Workers (one `getWorkspace()`, a few calls,
 return a response) tear the session down with the request, so the
