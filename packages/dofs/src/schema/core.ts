@@ -1,9 +1,15 @@
 // Filesystem-side tables. These hold the inode graph and the
 // content-addressed blob store. See docs/03_filesystem_schema.md.
 
-// See `schema/migrations.ts` for the migration list; `sync.ts`
+// Bumped to 2 when `_vfs_mounts.mode` landed (read-only mount
+// enforcement at the data layer). Bumped to 3 when `vfs_nodes`
+// gained a cached `size` column so stat() doesn't have to SUM
+// chunks on every call. Bumped to 4 when `_vfs_watermark` gained
+// a `backend` column so a single workspace can host more than
+// one backend with independent sync cursors. See
+// `schema/migrations.ts` for the migration list; `sync.ts`
 // carries the fresh-install DDL.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const ROOT_INODE = 1;
 
 export const CORE_STATEMENTS = [

@@ -54,8 +54,16 @@ export function initializeSchema(db: Database, now: () => number): void {
     db.run("INSERT OR IGNORE INTO vfs_meta (k, v) VALUES (?, ?)", "schema_version", SCHEMA_VERSION);
     db.run("UPDATE vfs_meta SET v = ? WHERE k = ?", SCHEMA_VERSION, "schema_version");
     db.run("INSERT OR IGNORE INTO vfs_meta (k, v) VALUES (?, ?)", "rev", 1);
-    db.run("INSERT OR IGNORE INTO _vfs_watermark (k, v) VALUES (?, ?)", "pushRev", 0);
-    db.run("INSERT OR IGNORE INTO _vfs_watermark (k, v) VALUES (?, ?)", "fetchRev", 0);
+    db.run(
+      "INSERT OR IGNORE INTO _vfs_watermark (k, backend, v) VALUES (?, 'default', ?)",
+      "pushRev",
+      0,
+    );
+    db.run(
+      "INSERT OR IGNORE INTO _vfs_watermark (k, backend, v) VALUES (?, 'default', ?)",
+      "fetchRev",
+      0,
+    );
 
     db.run(
       `INSERT OR IGNORE INTO vfs_nodes

@@ -9,11 +9,12 @@ export interface WorkspaceDirentResult {
   parentPath: string;
   isFile: boolean;
   isDirectory: boolean;
+  isSymbolicLink: boolean;
 }
 
 interface DirentRow {
   name: string;
-  type: "file" | "dir";
+  type: "file" | "dir" | "symlink";
 }
 
 export function readdir(db: Database, path: string): WorkspaceDirentResult[] {
@@ -40,6 +41,7 @@ export function readdir(db: Database, path: string): WorkspaceDirentResult[] {
     parentPath: canonical,
     isFile: row.type === "file",
     isDirectory: row.type === "dir",
+    isSymbolicLink: row.type === "symlink",
   }));
 
   // Merge in pending-create buffers parented under this directory so
@@ -58,6 +60,7 @@ export function readdir(db: Database, path: string): WorkspaceDirentResult[] {
         parentPath: canonical,
         isFile: true,
         isDirectory: false,
+        isSymbolicLink: false,
       });
     }
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));

@@ -60,9 +60,37 @@ function v2_to_v3_add_size_column(db: Database): void {
   );
 }
 
+// v3 → v4 — add a `backend` column to `_vfs_watermark` so a
+// workspace can host more than one backend with independent sync
+// cursors. SQLite's ALTER TABLE can't change a primary key; copy
+// existing rows into a fresh table with the composite
+// (k, backend) primary key, then swap the tables.
+//
+// Existing rows land under the `default` backend id, which the
+// dofs sync helpers also use as the fallback when a caller
+// doesn't pass an id. Pre-multi-backend workspaces keep their
+// pushRev / fetchRev cursors intact through the upgrade.
+function v3_to_v4_watermark_backend_column(db: Database): void {
+  db.run(`ALTER TABLE _vfs_watermark RENAME TO _vfs_watermark_v3`);
+  db.run(
+    `CREATE TABLE _vfs_watermark (
+       k       TEXT    NOT NULL,
+       backend TEXT    NOT NULL DEFAULT 'default',
+       v       INTEGER NOT NULL,
+       PRIMARY KEY (k, backend)
+     )`,
+  );
+  db.run(
+    `INSERT INTO _vfs_watermark (k, backend, v)
+       SELECT k, 'default', v FROM _vfs_watermark_v3`,
+  );
+  db.run(`DROP TABLE _vfs_watermark_v3`);
+}
+
 export const MIGRATIONS: readonly Migration[] = [
   { from: 1, to: 2, migrator: v1_to_v2_add_mounts_mode },
   { from: 2, to: 3, migrator: v2_to_v3_add_size_column },
+  { from: 3, to: 4, migrator: v3_to_v4_watermark_backend_column },
 ] as const;
 
 // Apply every migration whose `from` matches the current version,

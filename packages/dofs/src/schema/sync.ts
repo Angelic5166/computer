@@ -23,9 +23,16 @@ export const SYNC_STATEMENTS = [
   // index. Used on every recordDelete and on every push-tick that
   // processes tombstones.
   `CREATE INDEX IF NOT EXISTS vfs_changes_by_path ON vfs_changes(path, id DESC)`,
+  // Watermarks are keyed by (k, backend) so a workspace hosting
+  // multiple backends keeps each backend's sync cursors
+  // independent. The `backend` column was added at schema v3;
+  // `schema/migrations.ts` owns the ALTER for existing
+  // databases. Fresh installs land the composite key directly.
   `CREATE TABLE IF NOT EXISTS _vfs_watermark (
-    k TEXT PRIMARY KEY,
-    v INTEGER NOT NULL
+    k       TEXT    NOT NULL,
+    backend TEXT    NOT NULL DEFAULT 'default',
+    v       INTEGER NOT NULL,
+    PRIMARY KEY (k, backend)
   )`,
   // The `mode` column was added at schema v2; `schema/migrations.ts`
   // owns the ALTER for existing databases. Keep the CHECK

@@ -3,6 +3,7 @@ import { canonicalizePath } from "../path.js";
 import { incrementRev } from "../rev.js";
 import { ROOT_INODE } from "../schema/index.js";
 import type { Database } from "../storage.js";
+import { assertNotReadOnly } from "./mount-guard.js";
 
 // Create a symlink node. The target is stored as-is — it can be a
 // relative or absolute path, dangling or live. resolveInode follows
@@ -12,6 +13,7 @@ export function symlink(db: Database, target: string, path: string, now: () => n
   if (parts.length === 0) {
     throw createWorkspaceError("EEXIST", "cannot symlink onto root", canonical);
   }
+  assertNotReadOnly(db, canonical);
 
   db.transactionSync(() => {
     // Walk to the parent dirent. Intermediate segments must be real

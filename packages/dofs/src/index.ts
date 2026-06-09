@@ -1,5 +1,6 @@
 export type { WorkspaceErrorCode, WorkspaceFsError } from "./errors.js";
 export { createWorkspaceError } from "./errors.js";
+export { chmod } from "./fs/chmod.js";
 export {
   WorkspaceFilesystem,
   type WorkspaceFilesystemOptions,
@@ -21,8 +22,10 @@ export {
 } from "./fs/mount-guard.js";
 export type { WorkspaceDirentResult } from "./fs/readdir.js";
 export type { ReadFileOptions } from "./fs/readFile.js";
+export { readlink } from "./fs/readlink.js";
 export type { RmOptions } from "./fs/rm.js";
-export { stat, type WorkspaceStatResult } from "./fs/stat.js";
+export { lstat, stat, type WorkspaceStatResult } from "./fs/stat.js";
+export { symlink } from "./fs/symlink.js";
 export type { WriteFileContent, WriteFileOptions } from "./fs/writeFile.js";
 export type { SQLiteWorkspaceProviderOptions } from "./provider.js";
 export { SQLiteWorkspaceProvider } from "./provider.js";

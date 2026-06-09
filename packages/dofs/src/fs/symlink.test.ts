@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { mkdir } from "./mkdir.js";
+import { invalidateReadOnlyMountCache } from "./mount-guard.js";
 import { readlink } from "./readlink.js";
 import { resolveInode } from "./resolve.js";
 import { symlink } from "./symlink.js";
@@ -45,6 +46,19 @@ describe("symlink", () => {
       expect(row?.mtime).toBe(4242);
       expect(row?.rev).toBe(after);
       expect(row?.link_target).toBe("/t");
+    });
+  });
+
+  it("rejects EROFS when the link path overlaps a read-only mount root", async () => {
+    // Same guard that writeFile and mkdir consult — a symlink that
+    // lands inside a read-only mount is a write that the indexer
+    // must reject before the node table sees it.
+    await withDB((db) => {
+      db.run("INSERT INTO _vfs_mounts (root, kind, mode) VALUES ('/mnt', 'r2', 'read-only')");
+      invalidateReadOnlyMountCache(db);
+      expect(() => symlink(db, "/elsewhere", "/mnt/link", () => 0)).toThrowError(
+        expect.objectContaining({ code: "EROFS" }),
+      );
     });
   });
 

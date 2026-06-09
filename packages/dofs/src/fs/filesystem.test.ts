@@ -125,6 +125,36 @@ describe("WorkspaceFilesystem", () => {
     });
   });
 
+  it("chmod updates the stored mode", async () => {
+    await withFs(async (fs) => {
+      await fs.writeFile("/a", "hi");
+      await fs.chmod("/a", 0o600);
+      expect((await fs.stat("/a")).mode).toBe(0o600);
+    });
+  });
+
+  it("symlink + readlink round-trip", async () => {
+    await withFs(async (fs) => {
+      await fs.writeFile("/target", "hi");
+      await fs.symlink("/target", "/link");
+      expect(await fs.readlink("/link")).toBe("/target");
+    });
+  });
+
+  it("stat follows symlinks; lstat reports the link itself", async () => {
+    await withFs(async (fs) => {
+      await fs.writeFile("/target", "hello");
+      await fs.symlink("/target", "/link");
+      const s = await fs.stat("/link");
+      expect(s.isFile).toBe(true);
+      expect(s.isSymbolicLink).toBe(false);
+      const l = await fs.lstat("/link");
+      expect(l.isSymbolicLink).toBe(true);
+      expect(l.isFile).toBe(false);
+      expect(l.size).toBe("/target".length);
+    });
+  });
+
   it("threads the injected clock through writeFile", async () => {
     let t = 5000;
     await withFs(

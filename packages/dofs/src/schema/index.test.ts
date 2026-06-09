@@ -205,6 +205,63 @@ describe("initializeSchema", () => {
     ]);
   });
 
+  it("upgrades a v3 database, backfilling _vfs_watermark with the default backend", () => {
+    // Stage a database at the v3 shape: _vfs_watermark with the
+    // old single-column primary key, two existing rows; vfs_nodes
+    // already has the size column from the v2 -> v3 migration.
+    const storage = new SQLiteTestStorage();
+    const db = new Database(storage);
+
+    db.transactionSync(() => {
+      db.run(
+        `CREATE TABLE vfs_meta (
+          k TEXT PRIMARY KEY,
+          v INTEGER NOT NULL
+        )`,
+      );
+      db.run(
+        `CREATE TABLE _vfs_watermark (
+          k TEXT PRIMARY KEY,
+          v INTEGER NOT NULL
+        )`,
+      );
+      db.run("INSERT INTO _vfs_watermark (k, v) VALUES (?, ?)", "pushRev", 42);
+      db.run("INSERT INTO _vfs_watermark (k, v) VALUES (?, ?)", "fetchRev", 17);
+      db.run("INSERT INTO vfs_meta (k, v) VALUES (?, ?)", "schema_version", 3);
+    });
+
+    initializeSchema(db, () => 0);
+
+    // Version bumped.
+    const versionRow = db.one<{ v: number }>(
+      "SELECT v FROM vfs_meta WHERE k = ?",
+      "schema_version",
+    );
+    expect(versionRow?.v).toBe(SCHEMA_VERSION);
+
+    // Existing rows preserved under the default backend slot.
+    const push = db.one<{ k: string; backend: string; v: number }>(
+      "SELECT k, backend, v FROM _vfs_watermark WHERE k = ?",
+      "pushRev",
+    );
+    expect(push).toEqual({ k: "pushRev", backend: "default", v: 42 });
+    const fetch = db.one<{ k: string; backend: string; v: number }>(
+      "SELECT k, backend, v FROM _vfs_watermark WHERE k = ?",
+      "fetchRev",
+    );
+    expect(fetch).toEqual({ k: "fetchRev", backend: "default", v: 17 });
+
+    // The composite PK is live: same key under a different backend
+    // is allowed and doesn't collide with the migrated row.
+    db.run("INSERT INTO _vfs_watermark (k, backend, v) VALUES (?, ?, ?)", "pushRev", "worker", 99);
+    const worker = db.one<{ v: number }>(
+      "SELECT v FROM _vfs_watermark WHERE k = ? AND backend = ?",
+      "pushRev",
+      "worker",
+    );
+    expect(worker?.v).toBe(99);
+  });
+
   it("is idempotent across repeat calls", () => {
     const storage = new SQLiteTestStorage();
     const db = new Database(storage);

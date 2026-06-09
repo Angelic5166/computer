@@ -62,6 +62,13 @@ export interface ApplyOptions {
   // entry would generate a push-back on the next tick and the two
   // sides would ping-pong forever.
   source?: "local" | "upstream";
+  // Backend id whose watermark row this apply should touch. The
+  // DO hosts independent sync cursors per backend; threading the
+  // id through here keeps a pull from backend A from bumping
+  // backend B's pushRev. Defaults to the dofs `default` slot,
+  // which is fine for the container backend the package shipped
+  // with first.
+  backend?: string;
 }
 
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
@@ -194,9 +201,9 @@ export async function applyChanges(
   // mid-apply leaves the watermark behind and the next pull
   // re-fetches anything not yet committed.
   if (options.advanceFetchRev !== undefined) {
-    const current = readWatermark(db, "fetchRev");
+    const current = readWatermark(db, "fetchRev", options.backend);
     if (options.advanceFetchRev > current) {
-      writeWatermark(db, "fetchRev", options.advanceFetchRev);
+      writeWatermark(db, "fetchRev", options.advanceFetchRev, options.backend);
     }
   }
 
@@ -222,9 +229,9 @@ export async function applyChanges(
   // One redundant round-trip per apply, bounded.
   if (options.source === "upstream") {
     const revAfter = currentRev(db);
-    const existing = readWatermark(db, "pushRev");
+    const existing = readWatermark(db, "pushRev", options.backend);
     if (existing >= revBeforeApply && revAfter > existing) {
-      writeWatermark(db, "pushRev", revAfter);
+      writeWatermark(db, "pushRev", revAfter, options.backend);
     }
   }
 
@@ -329,17 +336,17 @@ export function applyChangesSync(
   }
 
   if (options.advanceFetchRev !== undefined) {
-    const current = readWatermark(db, "fetchRev");
+    const current = readWatermark(db, "fetchRev", options.backend);
     if (options.advanceFetchRev > current) {
-      writeWatermark(db, "fetchRev", options.advanceFetchRev);
+      writeWatermark(db, "fetchRev", options.advanceFetchRev, options.backend);
     }
   }
 
   if (options.source === "upstream") {
     const revAfter = currentRev(db);
-    const existing = readWatermark(db, "pushRev");
+    const existing = readWatermark(db, "pushRev", options.backend);
     if (existing >= revBeforeApply && revAfter > existing) {
-      writeWatermark(db, "pushRev", revAfter);
+      writeWatermark(db, "pushRev", revAfter, options.backend);
     }
   }
 

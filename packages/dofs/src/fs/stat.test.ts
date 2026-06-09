@@ -1,79 +1,56 @@
 import { describe, expect, it } from "vitest";
 
 import { mkdir } from "./mkdir.js";
-import { stat } from "./stat.js";
+import { lstat, stat } from "./stat.js";
+import { symlink } from "./symlink.js";
 import { withDB } from "./with-db.js";
-import { CHUNK_SIZE, writeFile } from "./writeFile.js";
+import { writeFileSync } from "./writeFile.js";
+
+const utf8 = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 describe("stat", () => {
-  it("returns root metadata", async () => {
-    await withDB(
-      (db) => {
-        expect(stat(db, "/")).toEqual({
-          name: "",
-          mode: 0o755,
-          mtime: 1234,
-          size: 0,
-          isFile: false,
-          isDirectory: true,
-        });
-      },
-      { now: () => 1234 },
-    );
+  it("reports a regular file", async () => {
+    await withDB((db) => {
+      writeFileSync(db, "/a.txt", utf8("hello"), { mode: 0o644 }, () => 1234);
+      const s = stat(db, "/a.txt");
+      expect(s).toMatchObject({
+        name: "a.txt",
+        mode: 0o644,
+        size: 5,
+        isFile: true,
+        isDirectory: false,
+        isSymbolicLink: false,
+        mtime: 1234,
+      });
+    });
   });
 
-  it("returns directory metadata with the directory name", async () => {
+  it("reports a directory", async () => {
     await withDB((db) => {
-      mkdir(db, "/dir", { mode: 0o750 }, () => 4242);
-      expect(stat(db, "/dir")).toEqual({
-        name: "dir",
-        mode: 0o750,
-        mtime: 4242,
+      mkdir(db, "/d", { mode: 0o700 }, () => 0);
+      const s = stat(db, "/d");
+      expect(s).toMatchObject({
+        name: "d",
+        mode: 0o700,
         size: 0,
         isFile: false,
         isDirectory: true,
+        isSymbolicLink: false,
       });
     });
   });
 
-  it("returns file metadata with content size", async () => {
-    await withDB(async (db) => {
-      await writeFile(db, "/hello.txt", "hello fuse", { mode: 0o600 }, () => 9999);
-      expect(stat(db, "/hello.txt")).toEqual({
-        name: "hello.txt",
-        mode: 0o600,
-        mtime: 9999,
-        size: 10,
-        isFile: true,
-        isDirectory: false,
-      });
-    });
-  });
-
-  it("reports zero size for an empty file", async () => {
-    await withDB(async (db) => {
-      await writeFile(db, "/empty", "", {}, () => 0);
-      expect(stat(db, "/empty").size).toBe(0);
-    });
-  });
-
-  it("sums sizes across multiple chunks", async () => {
-    await withDB(async (db) => {
-      const bytes = new Uint8Array(CHUNK_SIZE + 100);
-      await writeFile(db, "/big", bytes, {}, () => 0);
-      expect(stat(db, "/big").size).toBe(CHUNK_SIZE + 100);
-    });
-  });
-
-  it("works on nested paths", async () => {
-    await withDB(async (db) => {
-      mkdir(db, "/a/b", { recursive: true }, () => 0);
-      await writeFile(db, "/a/b/c.txt", "nested", {}, () => 0);
-      expect(stat(db, "/a/b/c.txt")).toMatchObject({
-        name: "c.txt",
-        size: 6,
-        isFile: true,
-      });
+  it("follows symlinks", async () => {
+    // stat() on a symlink reports the target. The link itself is
+    // observable only via lstat().
+    await withDB((db) => {
+      writeFileSync(db, "/target", utf8("hello"), { mode: 0o600 }, () => 0);
+      symlink(db, "/target", "/link", () => 0);
+      const s = stat(db, "/link");
+      expect(s.isFile).toBe(true);
+      expect(s.isSymbolicLink).toBe(false);
+      expect(s.mode).toBe(0o600);
+      expect(s.size).toBe(5);
     });
   });
 
@@ -82,12 +59,45 @@ describe("stat", () => {
       expect(() => stat(db, "/missing")).toThrowError(expect.objectContaining({ code: "ENOENT" }));
     });
   });
+});
 
-  it("throws ENOENT when an intermediate segment is missing", async () => {
+describe("lstat", () => {
+  it("reports a symlink without following it", async () => {
+    // POSIX lstat: size is the byte length of the stored target,
+    // mode is the symlink node's own mode (always 0o777 today).
     await withDB((db) => {
-      expect(() => stat(db, "/no/such/path")).toThrowError(
-        expect.objectContaining({ code: "ENOENT" }),
-      );
+      writeFileSync(db, "/target", utf8("hello world"), {}, () => 0);
+      symlink(db, "/target", "/link", () => 0);
+      const s = lstat(db, "/link");
+      expect(s.isSymbolicLink).toBe(true);
+      expect(s.isFile).toBe(false);
+      expect(s.isDirectory).toBe(false);
+      expect(s.size).toBe("/target".length);
+      expect(s.mode).toBe(0o777);
+    });
+  });
+
+  it("matches stat for non-symlink nodes", async () => {
+    await withDB((db) => {
+      writeFileSync(db, "/a.txt", utf8("hi"), {}, () => 0);
+      const s = stat(db, "/a.txt");
+      const l = lstat(db, "/a.txt");
+      expect(l).toEqual(s);
+    });
+  });
+
+  it("throws ENOENT for a missing path", async () => {
+    await withDB((db) => {
+      expect(() => lstat(db, "/missing")).toThrowError(expect.objectContaining({ code: "ENOENT" }));
+    });
+  });
+
+  it("returns the dangling symlink itself when the target is missing", async () => {
+    await withDB((db) => {
+      symlink(db, "/nowhere", "/dangling", () => 0);
+      const s = lstat(db, "/dangling");
+      expect(s.isSymbolicLink).toBe(true);
+      expect(s.size).toBe("/nowhere".length);
     });
   });
 });

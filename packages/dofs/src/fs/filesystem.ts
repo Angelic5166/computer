@@ -14,14 +14,17 @@
 
 import type { Database } from "../storage.js";
 
+import { chmod } from "./chmod.js";
 import { find, type WorkspaceFoundEntry } from "./find.js";
 import { type GrepOptions, grep, type WorkspaceGrepMatch } from "./grep.js";
 import { ls } from "./ls.js";
 import { type MkdirOptions, mkdir } from "./mkdir.js";
 import { readdir, type WorkspaceDirentResult } from "./readdir.js";
 import { type ReadFileOptions, readFile } from "./readFile.js";
+import { readlink } from "./readlink.js";
 import { type RmOptions, rm } from "./rm.js";
-import { stat, type WorkspaceStatResult } from "./stat.js";
+import { lstat, stat, type WorkspaceStatResult } from "./stat.js";
+import { symlink } from "./symlink.js";
 import { type WriteFileContent, type WriteFileOptions, writeFile } from "./writeFile.js";
 
 export interface WorkspaceFilesystemOptions {
@@ -61,6 +64,20 @@ export class WorkspaceFilesystem {
     return stat(this.db, path);
   }
 
+  // POSIX lstat — like stat, but doesn't follow a trailing symlink.
+  // Use when the caller wants to inspect the link itself: readlink
+  // / unlink under a Node-style fs surface, or just-bash's adapter
+  // routing lstat through to the workspace.
+  async lstat(path: string): Promise<WorkspaceStatResult> {
+    return lstat(this.db, path);
+  }
+
+  // Return the stored target of a symlink. EINVAL when path is
+  // not a symlink; ENOENT when path is missing.
+  async readlink(path: string): Promise<string> {
+    return readlink(this.db, path);
+  }
+
   async readdir(path: string): Promise<WorkspaceDirentResult[]> {
     return readdir(this.db, path);
   }
@@ -93,5 +110,19 @@ export class WorkspaceFilesystem {
 
   async rm(path: string, options: RmOptions = {}): Promise<void> {
     rm(this.db, path, options);
+  }
+
+  // Change the permission bits on a path. Follows symlinks like
+  // POSIX chmod — the change lands on the target, not the link.
+  // The supplied mode is masked to twelve bits.
+  async chmod(path: string, mode: number): Promise<void> {
+    chmod(this.db, path, mode, this.now);
+  }
+
+  // Create a symbolic link at `path` pointing at `target`. The
+  // target is stored verbatim; it can be relative or absolute and
+  // is allowed to dangle.
+  async symlink(target: string, path: string): Promise<void> {
+    symlink(this.db, target, path, this.now);
   }
 }

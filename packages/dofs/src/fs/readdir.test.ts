@@ -24,12 +24,14 @@ describe("readdir", () => {
         parentPath: "/",
         isFile: true,
         isDirectory: false,
+        isSymbolicLink: false,
       });
       expect(entries).toContainEqual({
         name: "sub",
         parentPath: "/",
         isFile: false,
         isDirectory: true,
+        isSymbolicLink: false,
       });
     });
   });
@@ -50,7 +52,13 @@ describe("readdir", () => {
 
       const entries = readdir(db, "/a/b");
       expect(entries).toEqual([
-        { name: "leaf.txt", parentPath: "/a/b", isFile: true, isDirectory: false },
+        {
+          name: "leaf.txt",
+          parentPath: "/a/b",
+          isFile: true,
+          isDirectory: false,
+          isSymbolicLink: false,
+        },
       ]);
     });
   });
@@ -77,6 +85,26 @@ describe("readdir", () => {
       expect(() => readdir(db, "/no/such/path")).toThrowError(
         expect.objectContaining({ code: "ENOENT" }),
       );
+    });
+  });
+
+  it("includes symlink entries with isSymbolicLink set", async () => {
+    // resolveInode + readdir originally only filtered file and dir
+    // rows; symlinks were invisible. The dirent shape now carries
+    // an explicit isSymbolicLink flag so just-bash and other
+    // adapters can branch on the type without a follow-up lstat.
+    const { symlink } = await import("./symlink.js");
+    await withDB(async (db) => {
+      await writeFile(db, "/target", "x", {}, () => 0);
+      symlink(db, "/target", "/link", () => 0);
+      const entries = readdir(db, "/");
+      const link = entries.find((e) => e.name === "link");
+      expect(link).toMatchObject({
+        name: "link",
+        isFile: false,
+        isDirectory: false,
+        isSymbolicLink: true,
+      });
     });
   });
 

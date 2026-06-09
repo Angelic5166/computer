@@ -53,4 +53,37 @@ describe("watermarks", () => {
     // documents the contract; the type system catches misuse.
     expect(true).toBe(true);
   });
+
+  describe("per-backend keying", () => {
+    it("writes under the default backend when the caller omits the id", async () => {
+      await withDB(async (db) => {
+        writeWatermark(db, "pushRev", 17);
+        // The omitted-id read sees the same row.
+        expect(readWatermark(db, "pushRev")).toBe(17);
+        // An explicit "default" id also sees it — same slot.
+        expect(readWatermark(db, "pushRev", "default")).toBe(17);
+      });
+    });
+
+    it("keeps each backend's cursors independent", async () => {
+      await withDB(async (db) => {
+        writeWatermark(db, "pushRev", 10, "worker");
+        writeWatermark(db, "pushRev", 20, "container");
+        expect(readWatermark(db, "pushRev", "worker")).toBe(10);
+        expect(readWatermark(db, "pushRev", "container")).toBe(20);
+        // A push under "worker" doesn't disturb the "container"
+        // backend's cursor.
+        writeWatermark(db, "pushRev", 11, "worker");
+        expect(readWatermark(db, "pushRev", "worker")).toBe(11);
+        expect(readWatermark(db, "pushRev", "container")).toBe(20);
+      });
+    });
+
+    it("unknown backend id reads as 0", async () => {
+      await withDB(async (db) => {
+        writeWatermark(db, "pushRev", 5, "worker");
+        expect(readWatermark(db, "pushRev", "never-registered")).toBe(0);
+      });
+    });
+  });
 });
