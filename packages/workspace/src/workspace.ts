@@ -20,6 +20,7 @@ import {
 import { pullOnce, pushOnce, reconcileWatermarks } from "@cloudflare/workspace-rpc/driver";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import { createGitClient, type GitClient, type GitIdentity } from "./git/index.js";
 import { MountIndex } from "./mounts/index.js";
 import { buildMountRegistry, type MountValue } from "./mounts/registry.js";
 import type { Mount } from "./mounts/types.js";
@@ -64,6 +65,12 @@ export interface WorkspaceOptions {
   // do not opt in. See `./observe.ts` for the contract and the
   // adapter subpaths for the Cloudflare runtime and OpenTelemetry.
   observer?: WorkspaceObserver;
+
+  // Default identity used by commit-producing git subcommands
+  // when neither the call site nor the relevant `GIT_AUTHOR_*` /
+  // `GIT_COMMITTER_*` env vars supply one. Threaded through to
+  // `createGitClient` on first access to `workspace.git`.
+  defaultGitIdentity?: GitIdentity;
 }
 
 export class Workspace {
@@ -79,6 +86,10 @@ export class Workspace {
   readonly #defaultBackendId: string | undefined;
   readonly #observer: WorkspaceObserver;
   readonly #now: () => number;
+  readonly #defaultGitIdentity: GitIdentity | undefined;
+  // Lazily-constructed git client, cached so the dynamic
+  // imports of isomorphic-git / diff land once per Workspace.
+  #git: GitClient | undefined;
   readonly #mounts: Map<string, Mount>;
   readonly #mountIndex: MountIndex;
   // Per-backend handle cache. Filled lazily on first use of each
@@ -103,6 +114,7 @@ export class Workspace {
 
   constructor(options: WorkspaceOptions) {
     this.#now = options.now ?? Date.now;
+    this.#defaultGitIdentity = options.defaultGitIdentity;
     this.#db = new Database(options.storage);
     initializeSchema(this.#db, this.#now);
     this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
@@ -176,6 +188,25 @@ export class Workspace {
   // also rejected (and surfaced via Workspace.pull's skipped[]).
   get fs(): WorkspaceFilesystem {
     return this.#fs;
+  }
+
+  // Git facade. Available immediately and does not require a
+  // backend — every supported subcommand reads and writes through
+  // the local SQLite-backed VFS. The dynamic imports for
+  // isomorphic-git / diff are deferred until the first method on
+  // the returned client is awaited; touching `workspace.git`
+  // itself is cheap.
+  //
+  // Memoised on a private field so repeated callers share the
+  // pack/index cache and the resolved peer-dep modules.
+  get git(): GitClient {
+    if (!this.#git) {
+      this.#git = createGitClient({
+        ws: this,
+        defaultIdentity: this.#defaultGitIdentity,
+      });
+    }
+    return this.#git;
   }
 
   /**

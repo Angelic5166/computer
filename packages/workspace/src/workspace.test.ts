@@ -339,6 +339,37 @@ describe("Workspace backend selection", () => {
     ).toThrow(/duplicate backend id/);
   });
 
+  describe("workspace.git", () => {
+    // workspace.git is a lazy property accessor that doesn't
+    // require a backend — every supported subcommand reads and
+    // writes through the local SQLite-backed VFS. We pin three
+    // contracts here: (1) repeat access returns the same client
+    // so the pack/index cache is shared, (2) constructing the
+    // client doesn't fire the dynamic imports of isomorphic-git
+    // / diff, (3) the surface is available on a Workspace with
+    // no backend configured.
+    it("returns the same client across calls", () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      expect(ws.git).toBe(ws.git);
+    });
+
+    it("is available with no backend configured", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      await ws.ready();
+      // help is hermetic — no dynamic imports, no fs touches.
+      const res = await ws.git.cli({ argv: ["help"] });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout).toContain("usage: git");
+    });
+
+    it("`git version` runs end-to-end without ready()", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      const res = await ws.git.cli({ argv: ["version"] });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout).toContain("@cloudflare/workspace");
+    });
+  });
+
   describe("without a backend", () => {
     // A Workspace constructed without backends gives callers the
     // local SQLite-backed filesystem on its own. The shell half
