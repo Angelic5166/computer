@@ -118,11 +118,28 @@ function printDebug(payload) {
   const phase = payload.phase ? `:${payload.phase}` : "";
   if (payload.kind === "tool-call") {
     const status = payload.success ? "ok" : "err";
+    // exec is the noisy one and the only tool with a meaningful
+    // backend choice. Hoist `backend` and `exitCode` into the
+    // headline so the 200-char detail slice doesn't have to
+    // happen to land on them. The output object's full JSON still
+    // follows in `detail` for anything else.
+    let label = bold(payload.tool);
+    if (
+      payload.tool === "exec" &&
+      payload.success &&
+      payload.output &&
+      typeof payload.output === "object"
+    ) {
+      const out = payload.output;
+      const backend = typeof out.backend === "string" ? out.backend : "?";
+      const code = typeof out.exitCode === "number" ? `exit=${out.exitCode}` : "";
+      label = `${bold("exec")}[${backend}]${code ? ` ${dim(code)}` : ""}`;
+    }
     const detail = payload.success
       ? JSON.stringify(payload.output ?? null).slice(0, 200)
       : `error=${String(payload.error).slice(0, 200)}`;
     process.stdout.write(
-      `${dim(`[${stamp} debug${phase}]`)} ${bold(payload.tool)} → ${status} ${dim(`(${payload.durationMs}ms)`)} ${detail}\n`,
+      `${dim(`[${stamp} debug${phase}]`)} ${label} → ${status} ${dim(`(${payload.durationMs}ms)`)} ${detail}\n`,
     );
     return;
   }
