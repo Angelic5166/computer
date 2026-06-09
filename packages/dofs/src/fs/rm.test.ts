@@ -5,6 +5,7 @@ import { mkdir } from "./mkdir.js";
 import { readdir } from "./readdir.js";
 import { resolveInode } from "./resolve.js";
 import { rm } from "./rm.js";
+import { symlink } from "./symlink.js";
 import { withDB } from "./with-db.js";
 import { writeFile } from "./writeFile.js";
 
@@ -57,6 +58,31 @@ describe("rm", () => {
       expect(before).toBe(1);
       rm(db, "/a.txt", {});
       expect(countBlobs(db)).toBe(1);
+    });
+  });
+
+  it("removes a symlink itself rather than its target", async () => {
+    await withDB(async (db) => {
+      await writeFile(db, "/target.txt", "still here", {}, () => 0);
+      symlink(db, "/target.txt", "/link.txt", () => 0);
+
+      rm(db, "/link.txt", {});
+
+      expect(resolveInode(db, "/link.txt", { followSymlinks: false })).toBeNull();
+      expect(resolveInode(db, "/target.txt")).not.toBeNull();
+    });
+  });
+
+  it("recursive rm does not follow symlinks out of the removed tree", async () => {
+    await withDB(async (db) => {
+      await writeFile(db, "/outside.txt", "still here", {}, () => 0);
+      mkdir(db, "/d", {}, () => 0);
+      symlink(db, "/outside.txt", "/d/link.txt", () => 0);
+
+      rm(db, "/d", { recursive: true });
+
+      expect(resolveInode(db, "/d", { followSymlinks: false })).toBeNull();
+      expect(resolveInode(db, "/outside.txt")).not.toBeNull();
     });
   });
 

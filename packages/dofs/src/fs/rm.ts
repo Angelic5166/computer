@@ -32,7 +32,7 @@ function* walkPostOrder(
 
   while (stack.length > 0) {
     const top = stack[stack.length - 1];
-    if (top.type === "file" || top.expanded) {
+    if (top.type !== "dir" || top.expanded) {
       stack.pop();
       yield { path: top.path, inode: top.inode, type: top.type };
       continue;
@@ -76,7 +76,7 @@ export function rm(db: Database, path: string, options: RmOptions): void {
   const recursive = options.recursive === true;
 
   db.transactionSync(() => {
-    const node = resolveInode(db, canonical);
+    const node = resolveInode(db, canonical, { followSymlinks: false });
     if (node === null) {
       if (force) return;
       throw createWorkspaceError("ENOENT", `no such path: ${canonical}`, canonical);

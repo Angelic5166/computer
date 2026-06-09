@@ -141,6 +141,15 @@ run "follow symlink"              -- 'echo content > target && ln -s target link
 run "stat -L follows"             -- 'echo x > target && ln -s target link && [ -f link ]'
 run "lstat shows symlink"         -- 'echo x > target && ln -s target link && [ -L link ]'
 run "dangling symlink"            -- 'ln -s nowhere d && [ -L d ] && [ ! -e d ]'
+run "rm -rf removes symlink entry" -- '
+  echo content > target
+  mkdir d
+  ln -s ../target d/link
+  rm -rf d
+  [ ! -e d ]
+  [ -f target ]
+  [ "$(cat target)" = "content" ]
+'
 
 section "hard links"
 run "create hard link"            -- 'echo content > a && ln a b && [ "$(cat b)" = "content" ]'

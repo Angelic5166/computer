@@ -199,6 +199,19 @@ test("FUSE ops return errno values instead of throwing for expected filesystem e
   expect(await status((cb) => ops.unlink("/missing", cb))).toBe(-2);
 });
 
+test("FUSE unlink removes a symlink itself rather than its target", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  vfs.writeFileSync("/target.txt", Buffer.from("still here"));
+  expect(await status((cb) => ops.symlink("/target.txt", "/link.txt", cb))).toBe(0);
+
+  expect(await status((cb) => ops.unlink("/link.txt", cb))).toBe(0);
+
+  expect(() => vfs.lstatSync("/link.txt")).toThrow();
+  expect(Buffer.from(vfs.readFileSync("/target.txt")).toString("utf8")).toBe("still here");
+});
+
 test("write past the per-file cap returns EFBIG instead of growing unbounded", async () => {
   // The driver keeps an in-memory buffer per file and doubles its
   // capacity on demand. Without a ceiling, a runaway client can OOM
