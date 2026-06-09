@@ -40,6 +40,27 @@ import {
 } from "./diff.js";
 import { type GitInitOptions, type IsomorphicGitInitClient, initWith } from "./init.js";
 import {
+  type FetchResult,
+  fetchWith,
+  type GitFetchOptions,
+  type GitMergeOptions,
+  type GitPullOptions,
+  type GitPushOptions,
+  type GitRemoteAddOptions,
+  type GitRemoteListOptions,
+  type GitRemoteRemoveOptions,
+  type IsomorphicGitNetworkClient,
+  type MergeResult,
+  mergeWith,
+  type PushResult,
+  pullWith,
+  pushWith,
+  type RemoteView,
+  remoteAddWith,
+  remoteListWith,
+  remoteRemoveWith,
+} from "./network.js";
+import {
   type CommitView,
   currentBranchWith,
   type GitCurrentBranchOptions,
@@ -101,6 +122,22 @@ export {
   PathspecNotFoundError,
 } from "./errors.js";
 export type { GitInitOptions } from "./init.js";
+export type {
+  AuthCallback,
+  FetchResult,
+  GitAuth,
+  GitFetchOptions,
+  GitMergeOptions,
+  GitPullOptions,
+  GitPushOptions,
+  GitRemoteAddOptions,
+  GitRemoteListOptions,
+  GitRemoteRemoveOptions,
+  MergeResult,
+  PushResult,
+  RefUpdateStatus,
+  RemoteView,
+} from "./network.js";
 export type {
   CommitView,
   GitCurrentBranchOptions,
@@ -181,6 +218,20 @@ export interface GitClient {
   tagList(options?: GitTagListOptions): Promise<string[]>;
   /** Move HEAD to a ref, or update working-tree paths to a ref. */
   checkout(options: GitCheckoutOptions): Promise<void>;
+  /** Fetch refs from a remote. */
+  fetch(options?: GitFetchOptions): Promise<FetchResult>;
+  /** Push local refs to a remote. */
+  push(options?: GitPushOptions): Promise<PushResult>;
+  /** Fetch and merge in one step. */
+  pull(options?: GitPullOptions): Promise<void>;
+  /** Merge a ref into the current branch (or `ours`). */
+  merge(options: GitMergeOptions): Promise<MergeResult>;
+  /** Add a named remote pointing at a URL. */
+  remoteAdd(options: GitRemoteAddOptions): Promise<void>;
+  /** Remove a named remote. */
+  remoteRemove(options: GitRemoteRemoveOptions): Promise<void>;
+  /** List configured remotes. */
+  remoteList(options?: GitRemoteListOptions): Promise<RemoteView[]>;
   /**
    * Argv-driven entry point. The worker-backend's `git` custom
    * command dispatches through this; in-process callers can use
@@ -414,6 +465,64 @@ export function createGitClient({
         fs: await fs(),
         git: await loadGit<IsomorphicGitRefsClient>(),
         cache,
+      });
+    },
+    async fetch(options = {}) {
+      return fetchWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
+        http: await loadHttp(),
+        cache,
+      });
+    },
+    async push(options = {}) {
+      return pushWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
+        http: await loadHttp(),
+        cache,
+      });
+    },
+    async pull(options = {}) {
+      return pullWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
+        http: await loadHttp(),
+        cache,
+        defaultIdentity,
+      });
+    },
+    async merge(options) {
+      return mergeWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
+        cache,
+        defaultIdentity,
+      });
+    },
+    async remoteAdd(options) {
+      return remoteAddWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
+      });
+    },
+    async remoteRemove(options) {
+      return remoteRemoveWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
+      });
+    },
+    async remoteList(options = {}) {
+      return remoteListWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitNetworkClient>(),
       });
     },
     async cli(input) {

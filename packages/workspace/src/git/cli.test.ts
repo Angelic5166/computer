@@ -35,6 +35,19 @@ import {
 import { createGitClient, type GitClient } from "./index.js";
 import type { GitInitOptions } from "./init.js";
 import type {
+  FetchResult,
+  GitFetchOptions,
+  GitMergeOptions,
+  GitPullOptions,
+  GitPushOptions,
+  GitRemoteAddOptions,
+  GitRemoteListOptions,
+  GitRemoteRemoveOptions,
+  MergeResult,
+  PushResult,
+  RemoteView,
+} from "./network.js";
+import type {
   CommitView,
   GitCurrentBranchOptions,
   GitLogOptions,
@@ -77,6 +90,13 @@ interface FakeCalls {
   tagDelete: GitTagDeleteOptions[];
   tagList: GitTagListOptions[];
   checkout: GitCheckoutOptions[];
+  fetch: GitFetchOptions[];
+  push: GitPushOptions[];
+  pull: GitPullOptions[];
+  merge: GitMergeOptions[];
+  remoteAdd: GitRemoteAddOptions[];
+  remoteRemove: GitRemoteRemoveOptions[];
+  remoteList: GitRemoteListOptions[];
 }
 
 function fakeClient(
@@ -91,6 +111,10 @@ function fakeClient(
     lsTree?: () => TreeEntryView[];
     branchList?: () => string[];
     tagList?: () => string[];
+    push?: () => PushResult;
+    merge?: () => MergeResult;
+    fetch?: () => FetchResult;
+    remoteList?: () => RemoteView[];
   } = {},
 ): {
   client: GitClient;
@@ -117,6 +141,13 @@ function fakeClient(
     tagDelete: [],
     tagList: [],
     checkout: [],
+    fetch: [],
+    push: [],
+    pull: [],
+    merge: [],
+    remoteAdd: [],
+    remoteRemove: [],
+    remoteList: [],
   };
   const client: GitClient = {
     async clone(options) {
@@ -198,6 +229,31 @@ function fakeClient(
     },
     async checkout(options) {
       calls.checkout.push(options);
+    },
+    async fetch(options = {}) {
+      calls.fetch.push(options);
+      return fakes.fetch?.() ?? { defaultBranch: "main", fetchHead: null };
+    },
+    async push(options = {}) {
+      calls.push.push(options);
+      return fakes.push?.() ?? { ok: true, error: null, refs: {} };
+    },
+    async pull(options = {}) {
+      calls.pull.push(options);
+    },
+    async merge(options) {
+      calls.merge.push(options);
+      return fakes.merge?.() ?? { fastForward: true, oid: "f".repeat(40) };
+    },
+    async remoteAdd(options) {
+      calls.remoteAdd.push(options);
+    },
+    async remoteRemove(options) {
+      calls.remoteRemove.push(options);
+    },
+    async remoteList(options = {}) {
+      calls.remoteList.push(options);
+      return fakes.remoteList?.() ?? [];
     },
     async cli() {
       throw new Error("not reached in these tests");
@@ -914,6 +970,226 @@ describe("runGitCli — checkout argv parsing", () => {
   });
 });
 
+describe("runGitCli — fetch argv parsing", () => {
+  it("bare `fetch` calls with no remote / ref", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, { argv: ["fetch"], cwd: "/r" });
+    expect(res.exitCode).toBe(0);
+    expect(calls.fetch).toEqual([
+      {
+        dir: "/r",
+        url: undefined,
+        remote: undefined,
+        ref: undefined,
+        depth: undefined,
+        singleBranch: undefined,
+        tags: undefined,
+        prune: false,
+      },
+    ]);
+  });
+
+  it("forwards a remote name positional", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["fetch", "origin", "main"] });
+    expect(calls.fetch[0]).toMatchObject({ remote: "origin", ref: "main" });
+  });
+
+  it("forwards a URL positional as `url`", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["fetch", "https://example.test/r.git"] });
+    expect(calls.fetch[0]).toMatchObject({
+      url: "https://example.test/r.git",
+      remote: undefined,
+    });
+  });
+
+  it("rejects ssh:// URLs", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["fetch", "ssh://git@example.test/r.git"] });
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("unsupported transport");
+  });
+
+  it("--depth and --prune are forwarded", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["fetch", "--depth", "3", "--prune", "origin"] });
+    expect(calls.fetch[0]).toMatchObject({ depth: 3, prune: true });
+  });
+});
+
+describe("runGitCli — push argv parsing", () => {
+  it("forwards remote / ref positionals and --force / --delete", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["push", "--force", "origin", "main"], cwd: "/r" });
+    expect(calls.push).toEqual([
+      {
+        dir: "/r",
+        url: undefined,
+        remote: "origin",
+        ref: "main",
+        force: true,
+        delete: false,
+      },
+    ]);
+  });
+
+  it("surfaces a non-ok PushResult as exit 1 on stderr", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        push: () => ({
+          ok: false,
+          error: "non-fast-forward",
+          refs: {},
+        }),
+      },
+    );
+    const res = await runGitCli(client, { argv: ["push"] });
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("non-fast-forward");
+  });
+});
+
+describe("runGitCli — pull argv parsing", () => {
+  it("forwards remote / ref and --ff-only", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, {
+      argv: ["pull", "--ff-only", "origin", "main"],
+      cwd: "/r",
+      env: { GIT_AUTHOR_NAME: "A", GIT_AUTHOR_EMAIL: "a@x" },
+    });
+    expect(calls.pull[0]).toMatchObject({
+      dir: "/r",
+      remote: "origin",
+      ref: "main",
+      fastForwardOnly: true,
+      env: { GIT_AUTHOR_NAME: "A", GIT_AUTHOR_EMAIL: "a@x" },
+    });
+  });
+
+  it("--no-ff turns fast-forward off", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["pull", "--no-ff"] });
+    expect(calls.pull[0].fastForward).toBe(false);
+  });
+});
+
+describe("runGitCli — merge argv parsing", () => {
+  it("forwards theirs and --ff-only / -m", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, {
+      argv: ["merge", "--ff-only", "-m", "merge feature", "feature"],
+      cwd: "/r",
+    });
+    expect(calls.merge[0]).toMatchObject({
+      dir: "/r",
+      theirs: "feature",
+      fastForwardOnly: true,
+      message: "merge feature",
+    });
+  });
+
+  it("prints the appropriate summary line for a fast-forward", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        merge: () => ({ fastForward: true, oid: "a".repeat(40) }),
+      },
+    );
+    const res = await runGitCli(client, { argv: ["merge", "feature"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("Fast-forward to aaaaaaa");
+  });
+
+  it("prints 'Already up to date.' on a no-op merge", async () => {
+    const { client } = fakeClient({}, { merge: () => ({ alreadyMerged: true }) });
+    const res = await runGitCli(client, { argv: ["merge", "feature"] });
+    expect(res.stdout).toBe("Already up to date.\n");
+  });
+
+  it("merge with no ref is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["merge"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("missing <ref>");
+  });
+});
+
+describe("runGitCli — remote argv parsing", () => {
+  it("bare `remote` lists names lexicographically", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        remoteList: () => [
+          { name: "origin", url: "https://example.test/r.git" },
+          { name: "fork", url: "https://fork.example.test/r.git" },
+        ],
+      },
+    );
+    const res = await runGitCli(client, { argv: ["remote"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("fork\norigin\n");
+  });
+
+  it("`remote -v` prints fetch and push lines per remote", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        remoteList: () => [{ name: "origin", url: "https://example.test/r.git" }],
+      },
+    );
+    const res = await runGitCli(client, { argv: ["remote", "-v"] });
+    expect(res.stdout).toBe(
+      "origin\thttps://example.test/r.git (fetch)\norigin\thttps://example.test/r.git (push)\n",
+    );
+  });
+
+  it("`remote add` accepts a name and URL", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, {
+      argv: ["remote", "add", "origin", "https://example.test/r.git"],
+    });
+    expect(res.exitCode).toBe(0);
+    expect(calls.remoteAdd).toEqual([
+      {
+        dir: "/",
+        name: "origin",
+        url: "https://example.test/r.git",
+        force: false,
+      },
+    ]);
+  });
+
+  it("`remote add` rejects ssh URLs", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, {
+      argv: ["remote", "add", "origin", "ssh://git@example.test/r.git"],
+    });
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("unsupported transport");
+  });
+
+  it("`remote remove <name>` deletes", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["remote", "remove", "origin"] });
+    expect(calls.remoteRemove).toEqual([{ dir: "/", name: "origin" }]);
+  });
+
+  it("`remote rm <name>` is an alias for remove", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["remote", "rm", "origin"] });
+    expect(calls.remoteRemove).toEqual([{ dir: "/", name: "origin" }]);
+  });
+
+  it("unknown remote subcommand is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["remote", "sniff"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("unknown subcommand 'sniff'");
+  });
+});
+
 // ---------------------------------------------------------------
 // End-to-end: real Workspace + real isomorphic-git/diff, faked
 // clone phase. Matches the pattern in clone.test.ts.
@@ -1029,6 +1305,29 @@ describe("runGitCli — end-to-end against an in-process Workspace", () => {
     const lsFiles = await cli(["ls-files"]);
     expect(lsFiles.exitCode).toBe(0);
     expect(lsFiles.stdout).toBe("a.txt\n");
+  });
+
+  it("remote add / list / remove round-trip through the config file", async () => {
+    const ws = new Workspace({ storage: new SQLiteTestStorage() });
+    await ws.ready();
+    const cli = (argv: string[]) => ws.git.cli({ argv, cwd: "/" });
+    await cli(["init"]);
+
+    expect((await cli(["remote", "add", "origin", "https://example.test/r.git"])).exitCode).toBe(0);
+    expect((await cli(["remote", "add", "fork", "https://fork.example.test/r.git"])).exitCode).toBe(
+      0,
+    );
+
+    const list = await cli(["remote"]);
+    expect(list.stdout).toBe("fork\norigin\n");
+
+    const verbose = await cli(["remote", "-v"]);
+    expect(verbose.stdout).toContain("fork\thttps://fork.example.test/r.git (fetch)");
+    expect(verbose.stdout).toContain("origin\thttps://example.test/r.git (push)");
+
+    await cli(["remote", "remove", "fork"]);
+    const after = await cli(["remote"]);
+    expect(after.stdout).toBe("origin\n");
   });
 
   it("branch / checkout / tag round-trip moves HEAD and creates refs", async () => {

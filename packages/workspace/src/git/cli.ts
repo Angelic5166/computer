@@ -118,6 +118,16 @@ export async function runGitCli(
       return await runTag(client, rest, input);
     case "checkout":
       return await runCheckout(client, rest, input);
+    case "fetch":
+      return await runFetch(client, rest, input);
+    case "push":
+      return await runPush(client, rest, input);
+    case "pull":
+      return await runPull(client, rest, input);
+    case "merge":
+      return await runMerge(client, rest, input);
+    case "remote":
+      return await runRemote(client, rest, input);
     default:
       return {
         stdout: "",
@@ -142,10 +152,15 @@ function printHelp(): GitCliResult {
     "   clone         Clone a remote repository into the workspace.",
     "   commit        Write the current index to a new commit.",
     "   diff          Show changes between HEAD and the working tree.",
+    "   fetch         Fetch refs from a remote.",
     "   init          Initialise a new repository.",
     "   log           List commits reachable from HEAD.",
     "   ls-files      List files in the index (or at a ref).",
     "   ls-tree       List one level of a tree.",
+    "   merge         Merge a ref into the current branch.",
+    "   pull          Fetch and merge in one step.",
+    "   push          Push local refs to a remote.",
+    "   remote        Manage configured remotes.",
     "   rev-parse     Resolve a ref to its SHA-1 oid.",
     "   rm            Unstage paths from the index.",
     "   show          Read a single commit.",
@@ -1002,6 +1017,362 @@ async function runCheckout(
     return { stdout: "", stderr: "", exitCode: 0 };
   } catch (cause) {
     return mapGitError("checkout", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// fetch
+// ---------------------------------------------------------------
+
+async function runFetch(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git fetch [<remote>] [<ref>] [--depth N] [--no-tags] [--prune]`
+  const parsed = parseFlags(args, {
+    depth: { kind: "value" },
+    "single-branch": { kind: "bool" },
+    "no-single-branch": { kind: "bool" },
+    tags: { kind: "bool" },
+    "no-tags": { kind: "bool" },
+    prune: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git fetch: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 2) {
+    return {
+      stdout: "",
+      stderr: `git fetch: unexpected argument '${parsed.positional[2]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const [first, second] = parsed.positional;
+  // Heuristic mirroring real git: if the first positional looks
+  // like a URL, treat it as the remote URL and the second as a
+  // ref. Otherwise the first is a remote name.
+  const looksLikeUrl = first !== undefined && /^[a-z][a-z0-9+.-]*:\/\//.test(first);
+  const url = looksLikeUrl ? first : undefined;
+  const remote = looksLikeUrl ? undefined : first;
+  const ref = looksLikeUrl ? second : (second ?? undefined);
+
+  let depth: number | undefined;
+  if (parsed.flags.depth !== undefined) {
+    const n = Number.parseInt(parsed.flags.depth as string, 10);
+    if (!Number.isFinite(n) || n < 1) {
+      return {
+        stdout: "",
+        stderr: `git fetch: --depth requires a positive integer (got ${JSON.stringify(parsed.flags.depth)})\n`,
+        exitCode: 129,
+      };
+    }
+    depth = n;
+  }
+
+  if (url !== undefined && !isSupportedRemoteUrl(url)) {
+    return {
+      stdout: "",
+      stderr: `git fetch: unsupported transport for '${url}'. Only https://, http://, and file:// are supported.\n`,
+      exitCode: 1,
+    };
+  }
+
+  let singleBranch: boolean | undefined;
+  if (parsed.flags["single-branch"]) singleBranch = true;
+  if (parsed.flags["no-single-branch"]) singleBranch = false;
+  let tags: boolean | undefined;
+  if (parsed.flags.tags) tags = true;
+  if (parsed.flags["no-tags"]) tags = false;
+
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    await client.fetch({
+      dir,
+      url,
+      remote,
+      ref,
+      depth,
+      singleBranch,
+      tags,
+      prune: parsed.flags.prune === true,
+    });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("fetch", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// push
+// ---------------------------------------------------------------
+
+async function runPush(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git push [<remote>] [<ref>] [--force] [--delete]`
+  const parsed = parseFlags(args, {
+    force: { kind: "bool", alias: ["f"] },
+    delete: { kind: "bool", alias: ["d"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git push: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 2) {
+    return {
+      stdout: "",
+      stderr: `git push: unexpected argument '${parsed.positional[2]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const [first, second] = parsed.positional;
+  const looksLikeUrl = first !== undefined && /^[a-z][a-z0-9+.-]*:\/\//.test(first);
+  const url = looksLikeUrl ? first : undefined;
+  const remote = looksLikeUrl ? undefined : first;
+  const ref = looksLikeUrl ? second : (second ?? undefined);
+
+  if (url !== undefined && !isSupportedRemoteUrl(url)) {
+    return {
+      stdout: "",
+      stderr: `git push: unsupported transport for '${url}'. Only https://, http://, and file:// are supported.\n`,
+      exitCode: 1,
+    };
+  }
+
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const result = await client.push({
+      dir,
+      url,
+      remote,
+      ref,
+      force: parsed.flags.force === true,
+      delete: parsed.flags.delete === true,
+    });
+    if (!result.ok) {
+      const err = result.error ?? "push rejected";
+      return { stdout: "", stderr: `git push: ${err}\n`, exitCode: 1 };
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("push", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// pull
+// ---------------------------------------------------------------
+
+async function runPull(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git pull [<remote>] [<ref>] [--ff-only] [--no-ff]`
+  const parsed = parseFlags(args, {
+    "ff-only": { kind: "bool" },
+    "no-ff": { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git pull: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 2) {
+    return {
+      stdout: "",
+      stderr: `git pull: unexpected argument '${parsed.positional[2]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const [first, second] = parsed.positional;
+  const looksLikeUrl = first !== undefined && /^[a-z][a-z0-9+.-]*:\/\//.test(first);
+  const url = looksLikeUrl ? first : undefined;
+  const remote = looksLikeUrl ? undefined : first;
+  const ref = looksLikeUrl ? second : (second ?? undefined);
+
+  if (url !== undefined && !isSupportedRemoteUrl(url)) {
+    return {
+      stdout: "",
+      stderr: `git pull: unsupported transport for '${url}'. Only https://, http://, and file:// are supported.\n`,
+      exitCode: 1,
+    };
+  }
+
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    await client.pull({
+      dir,
+      url,
+      remote,
+      ref,
+      fastForwardOnly: parsed.flags["ff-only"] === true,
+      fastForward: parsed.flags["no-ff"] === true ? false : undefined,
+      env: input.env,
+    });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("pull", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// merge
+// ---------------------------------------------------------------
+
+async function runMerge(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  const parsed = parseFlags(args, {
+    "ff-only": { kind: "bool" },
+    "no-ff": { kind: "bool" },
+    message: { kind: "value", alias: ["m"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git merge: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length === 0) {
+    return { stdout: "", stderr: "git merge: missing <ref>\n", exitCode: 129 };
+  }
+  if (parsed.positional.length > 1) {
+    return {
+      stdout: "",
+      stderr: `git merge: unexpected argument '${parsed.positional[1]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const result = await client.merge({
+      dir,
+      theirs: parsed.positional[0],
+      fastForwardOnly: parsed.flags["ff-only"] === true,
+      fastForward: parsed.flags["no-ff"] === true ? false : undefined,
+      message: parsed.flags.message as string | undefined,
+      env: input.env,
+    });
+    if (result.alreadyMerged) {
+      return { stdout: "Already up to date.\n", stderr: "", exitCode: 0 };
+    }
+    if (result.fastForward && result.oid) {
+      return {
+        stdout: `Fast-forward to ${result.oid.slice(0, 7)}\n`,
+        stderr: "",
+        exitCode: 0,
+      };
+    }
+    if (result.oid) {
+      return {
+        stdout: `Merge commit ${result.oid.slice(0, 7)}\n`,
+        stderr: "",
+        exitCode: 0,
+      };
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("merge", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// remote
+// ---------------------------------------------------------------
+
+async function runRemote(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git remote`              -> list (names only)
+  // `git remote -v`           -> list (name + url, tab separated, twice)
+  // `git remote add <n> <u>`  -> add
+  // `git remote remove <n>`   -> remove
+  const dir = resolveDir(undefined, input.cwd);
+  if (args.length === 0) {
+    try {
+      const remotes = await client.remoteList({ dir });
+      if (remotes.length === 0) return { stdout: "", stderr: "", exitCode: 0 };
+      return {
+        stdout: `${remotes
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((r) => r.name)
+          .join("\n")}\n`,
+        stderr: "",
+        exitCode: 0,
+      };
+    } catch (cause) {
+      return mapGitError("remote", cause);
+    }
+  }
+  // `-v` lives at the top level, no subcommand.
+  if (args.length === 1 && (args[0] === "-v" || args[0] === "--verbose")) {
+    try {
+      const remotes = await client.remoteList({ dir });
+      if (remotes.length === 0) return { stdout: "", stderr: "", exitCode: 0 };
+      const lines: string[] = [];
+      for (const r of remotes.slice().sort((a, b) => a.name.localeCompare(b.name))) {
+        lines.push(`${r.name}\t${r.url} (fetch)`);
+        lines.push(`${r.name}\t${r.url} (push)`);
+      }
+      return { stdout: `${lines.join("\n")}\n`, stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("remote", cause);
+    }
+  }
+  const [sub, ...rest] = args;
+  switch (sub) {
+    case "add": {
+      const parsed = parseFlags(rest, { force: { kind: "bool", alias: ["f"] } });
+      if ("error" in parsed) {
+        return { stdout: "", stderr: `git remote add: ${parsed.error}\n`, exitCode: 129 };
+      }
+      if (parsed.positional.length !== 2) {
+        return {
+          stdout: "",
+          stderr: "git remote add: usage: git remote add [--force] <name> <url>\n",
+          exitCode: 129,
+        };
+      }
+      const [name, url] = parsed.positional;
+      if (!isSupportedRemoteUrl(url)) {
+        return {
+          stdout: "",
+          stderr: `git remote add: unsupported transport for '${url}'.\n`,
+          exitCode: 1,
+        };
+      }
+      try {
+        await client.remoteAdd({ dir, name, url, force: parsed.flags.force === true });
+        return { stdout: "", stderr: "", exitCode: 0 };
+      } catch (cause) {
+        return mapGitError("remote", cause);
+      }
+    }
+    case "remove":
+    case "rm": {
+      if (rest.length !== 1) {
+        return {
+          stdout: "",
+          stderr: `git remote ${sub}: usage: git remote ${sub} <name>\n`,
+          exitCode: 129,
+        };
+      }
+      try {
+        await client.remoteRemove({ dir, name: rest[0] });
+        return { stdout: "", stderr: "", exitCode: 0 };
+      } catch (cause) {
+        return mapGitError("remote", cause);
+      }
+    }
+    default:
+      return {
+        stdout: "",
+        stderr: `git remote: unknown subcommand '${sub}'\n`,
+        exitCode: 129,
+      };
   }
 }
 
