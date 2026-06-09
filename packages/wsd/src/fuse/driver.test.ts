@@ -243,7 +243,7 @@ test("write past the per-file cap returns EFBIG instead of growing unbounded", a
 });
 
 test("FUSE write is visible through the backing VFS after release", async () => {
-  // The production wsd-container example showed FUSE-written files
+  // The production container example showed FUSE-written files
   // returning HTTP 200 / 0 bytes when read back via the RPC
   // surface. makeFUSEOps keeps a per-file in-memory buffer
   // (`files` Map) that .write() updates; .release(), .flush(),

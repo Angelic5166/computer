@@ -2,7 +2,7 @@
 
 // End-to-end verification that wsd's FUSE driver spills its
 // in-memory write buffer into the backing VFS so capnweb-side
-// pullOnce sees the bytes. Reproduces the production wsd-container
+// pullOnce sees the bytes. Reproduces the production container
 // failure (FUSE-write \u2192 RPC-read returns 0 bytes) locally against
 // a freshly-built wsd binary.
 //

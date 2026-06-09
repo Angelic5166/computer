@@ -108,9 +108,9 @@ jobs:
           - name: think
             workspace: "@cloudflare/example-think"
             path: examples/think
-          - name: wsd-container
-            workspace: "@cloudflare/example-wsd-container"
-            path: examples/wsd-container
+          - name: container
+            workspace: "@example/workspace-container"
+            path: examples/container
     steps:
       - uses: actions/checkout@v6
         with:
