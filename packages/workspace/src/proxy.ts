@@ -139,7 +139,7 @@ export class WorkspaceServiceProxy extends WorkerEntrypoint<unknown, WorkspaceSe
   async getWorkspace(): Promise<unknown> {
     const { binding, id } = this.ctx.props;
     const ns = (this.env as Record<string, unknown>)[binding] as
-      | DurableObjectNamespace<{ getWorkspace(): Promise<unknown> }>
+      | DurableObjectNamespace<Rpc.DurableObjectBranded & { getWorkspace(): Promise<unknown> }>
       | undefined;
     if (!ns) {
       throw new Error(`WorkspaceServiceProxy: env.${binding} is not a DurableObjectNamespace`);
