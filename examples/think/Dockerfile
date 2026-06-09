@@ -12,9 +12,23 @@ FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.6 AS wsd
 
 FROM debian:stable-slim
 
+# We install Node 22 (LTS) from NodeSource so the agent has
+# `node`, `npm`, and `npx` on $PATH for the typical "clone the
+# repo, npm install, npm test" loop. curl + gnupg are pulled in
+# just for the NodeSource key dance and stay in the image; they
+# come in handy for ad-hoc agent commands too. The cost is ~120 MB
+# of layer over the base; acceptable for an example whose whole
+# point is running real build/test workflows.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fuse3 libfuse2t64 ca-certificates git \
+      fuse3 libfuse2t64 ca-certificates curl gnupg git \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
