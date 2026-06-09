@@ -117,29 +117,26 @@ function printDebug(payload) {
   const stamp = new Date().toISOString().slice(11, 19);
   const phase = payload.phase ? `:${payload.phase}` : "";
   if (payload.kind === "tool-call") {
-    const status = payload.success ? "ok" : "err";
-    // exec is the noisy one and the only tool with a meaningful
-    // backend choice. Hoist `backend` and `exitCode` into the
-    // headline so the 200-char detail slice doesn't have to
-    // happen to land on them. The output object's full JSON still
-    // follows in `detail` for anything else.
-    let label = bold(payload.tool);
+    // exec is the noisy tool and the only one with a meaningful
+    // backend choice. Print it as a multi-line block: a headline
+    // with backend / exit code / duration, the command verbatim
+    // on a `$` line, and the captured streams under indented
+    // labels. Other tools keep the original one-liner shape.
     if (
       payload.tool === "exec" &&
       payload.success &&
       payload.output &&
       typeof payload.output === "object"
     ) {
-      const out = payload.output;
-      const backend = typeof out.backend === "string" ? out.backend : "?";
-      const code = typeof out.exitCode === "number" ? `exit=${out.exitCode}` : "";
-      label = `${bold("exec")}[${backend}]${code ? ` ${dim(code)}` : ""}`;
+      printExecBlock(stamp, phase, payload);
+      return;
     }
+    const status = payload.success ? "ok" : "err";
     const detail = payload.success
       ? JSON.stringify(payload.output ?? null).slice(0, 200)
       : `error=${String(payload.error).slice(0, 200)}`;
     process.stdout.write(
-      `${dim(`[${stamp} debug${phase}]`)} ${label} → ${status} ${dim(`(${payload.durationMs}ms)`)} ${detail}\n`,
+      `${dim(`[${stamp} debug${phase}]`)} ${bold(payload.tool)} → ${status} ${dim(`(${payload.durationMs}ms)`)} ${detail}\n`,
     );
     return;
   }
@@ -175,6 +172,53 @@ function printDebug(payload) {
   process.stdout.write(
     `${dim(`[${stamp} debug${phase}]`)} ${JSON.stringify(payload).slice(0, 400)}\n`,
   );
+}
+
+// Pretty-print one exec tool-call as a multi-line block. The
+// exec tool's output object is `{ command, cwd, backend,
+// exitCode, stdout, stderr }`; we already truncate stdout /
+// stderr server-side at 64 KiB per stream, and apply a softer
+// EXEC_STREAM_MAX cap here for the terminal. A non-zero exit
+// code paints the exit field red; non-empty stderr is always
+// shown, dimmed when the command succeeded and red when it
+// didn't.
+const EXEC_STREAM_MAX = 2 * 1024;
+function printExecBlock(stamp, phase, payload) {
+  const out = payload.output;
+  const command = typeof out.command === "string" ? out.command : "";
+  const cwd = typeof out.cwd === "string" && out.cwd ? out.cwd : null;
+  const backend = typeof out.backend === "string" ? out.backend : "?";
+  const exitCode = typeof out.exitCode === "number" ? out.exitCode : null;
+  const stdout = typeof out.stdout === "string" ? out.stdout : "";
+  const stderr = typeof out.stderr === "string" ? out.stderr : "";
+  const exitLabel =
+    exitCode === null ? "" : ` ${exitCode === 0 ? dim(`exit=0`) : red(`exit=${exitCode}`)}`;
+  const cwdLabel = cwd ? ` ${dim(`cwd=${cwd}`)}` : "";
+  process.stdout.write(
+    `${dim(`[${stamp} debug${phase}]`)} ${bold("exec")}${dim(`[`)}${cyan(backend)}${dim(`]`)}${exitLabel}${cwdLabel} ${dim(`(${payload.durationMs}ms)`)}\n`,
+  );
+  process.stdout.write(`  ${dim("$")} ${command}\n`);
+  writeExecStream("stdout", stdout, false);
+  // stderr stays red when the command failed; on success it's
+  // dimmed so warnings (npm deprecations, etc.) read as
+  // background noise instead of an alarm.
+  writeExecStream("stderr", stderr, exitCode !== 0);
+}
+
+function writeExecStream(label, value, errorTone) {
+  if (!value) {
+    process.stdout.write(`  ${dim(`${label}:`)} ${dim("(empty)")}\n`);
+    return;
+  }
+  const trimmed =
+    value.length <= EXEC_STREAM_MAX
+      ? value
+      : `${value.slice(0, EXEC_STREAM_MAX)}\n[truncated, ${value.length - EXEC_STREAM_MAX} more bytes]`;
+  process.stdout.write(`  ${dim(`${label}:`)}\n`);
+  for (const line of trimmed.split("\n")) {
+    const tinted = errorTone ? red(line) : line;
+    process.stdout.write(`    ${tinted}\n`);
+  }
 }
 
 function printMessage(message) {
