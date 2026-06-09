@@ -1,10 +1,32 @@
 # Cloudflare Workspace
 
-Cloudflare Workspace is a virtual filesystem that lives inside a Durable
-Object and projects itself into a sandbox container as a real FUSE
-mount. The Durable Object holds the authoritative state in SQLite; a
-sandbox-side daemon (`wsd`) mounts that state as a filesystem and syncs
-changes back over a capnweb RPC channel.
+Cloudflare Workspace is a virtual filesystem that lives inside a
+Durable Object. The Durable Object holds the authoritative state in
+SQLite and exposes the filesystem to a shell through a pluggable
+backend. Two backends ship today:
+
+- **Container** projects the SQLite state into a sandbox container as
+  a real FUSE mount. A sandbox-side daemon (`wsd`) mounts the state
+  as a filesystem and syncs changes back over a capnweb RPC channel.
+  Full Linux userland, real binaries, real network.
+- **Worker** runs the shell as [just-bash](https://github.com/vercel-labs/just-bash)
+  inside a Dynamic Worker loaded through `env.LOADER`. The shell
+  reaches the host workspace over Workers RPC, so there is no second
+  store and no sync round trip. Broad textual tooling (`cat`,
+  `grep`, `awk`, `sed`, `jq`, ...), no container lifecycle.
+
+A single Workspace can host more than one backend at the same
+time. Each backend registers under a stable `id`; `shell.exec`
+defaults to the first one in the list and the caller routes a
+specific call elsewhere with `{ backend: "sandbox" }`. Common
+shape: a Worker backend for cheap textual tooling that runs every
+command cold, plus a Container backend the agent reaches for when
+it needs a real Linux environment for `npm`, `git`, or anything
+else the worker isolate can't host. Each backend keeps its own
+sync cursors and connects lazily on first use.
+
+Workspace can also be constructed without a backend at all, giving
+callers the filesystem on its own.
 
 > [!IMPORTANT]
 > **PREVIEW ONLY** This package is provided as a preview for feedback only.
@@ -22,7 +44,8 @@ changes back over a capnweb RPC channel.
 - npm. This repo uses npm workspaces.
 - Linux with FUSE if you want to run `packages/wsd` end-to-end. Other
   packages build and test on macOS as well.
-- Docker, optionally, for [`examples/wsd-container`](examples/wsd-container).
+- Docker, optionally, for [`examples/container`](examples/container).
+  The worker example needs no Docker.
 
 ## Quick start
 
@@ -36,9 +59,12 @@ npm test
 
 To see the pieces working together, start with the examples:
 
-- [`examples/wsd-container`](examples/wsd-container) — runs `wsd`
-  inside a container, mounts a workspace, and talks to a Durable
-  Object over capnweb.
+- [`examples/container`](examples/container) — runs `wsd` inside a
+  container, mounts a workspace, and talks to a Durable Object over
+  capnweb.
+- [`examples/worker`](examples/worker) — same HTTP surface as the
+  container example, but the shell runs in a Dynamic Worker loaded
+  through `env.LOADER`. No container.
 - [`examples/think`](examples/think) — an agent that uses the
   workspace as its working directory.
 

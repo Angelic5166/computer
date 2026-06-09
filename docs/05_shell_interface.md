@@ -297,6 +297,62 @@ These errors propagate as thrown rejections from the host call. They
 parallel the filesystem error surface in
 [04. Filesystem Interface](./04_filesystem_interface.md).
 
+## Backend selection
+
+`Workspace.shell.exec` resolves the backend to dispatch into on
+every call. A workspace with one backend uses it as the default;
+a workspace with more than one uses the first backend in the
+list as the default and lets the caller name another through
+`ExecOptions.backend`:
+
+```ts
+const run = await ws.shell.exec("npm test", { backend: "sandbox" });
+```
+
+The id is the same selector `Workspace.push(id?)` and
+`Workspace.pull(id?)` take. An unknown id rejects with a clear
+error naming the configured backends.
+
+Backends connect lazily — the first `exec` (or `push` / `pull` /
+`ready(id)`) for an id dials it. The connect runs once per
+workspace lifetime; the resolved handle is cached until the
+backend's `closed` promise fires or `Workspace.close()` runs.
+Each backend keeps its own `pushRev` / `fetchRev` watermarks in
+the dofs `_vfs_watermark` table, keyed by the backend's id; a
+pull from backend A never touches backend B's cursors.
+
+### Cross-backend writes
+
+A workspace with two backends that both touch `/workspace` has
+**no global ordering between them**. The container backend's
+writes land in the in-container VFS first and only become visible
+to the DO after the next pull; the worker backend's writes land
+in the DO directly through the host RPC. Two `exec` calls fired
+close together against different backends can finish in either
+order, and the file state the host store sees afterwards depends
+on which side's pull ran last.
+
+Callers that need a happens-before between cross-backend execs
+have to drive the sequencing themselves:
+
+```ts
+// Bad: races. The build's container-side writes may not be
+// visible to the grep before grep runs.
+const build = ws.shell.exec("npm test", { backend: "sandbox" });
+const grep = ws.shell.exec("grep -r FAIL /workspace");
+await Promise.all([build, grep]);
+
+// Good: await the build's result() so its post-exec pull
+// completes, then start the worker-backend exec.
+await (await ws.shell.exec("npm test", { backend: "sandbox" })).result();
+await (await ws.shell.exec("grep -r FAIL /workspace")).result();
+```
+
+This is the same shape as the read-only mount enforcement note
+in [06. Mount Interface](./06_mount_interface.md): the data layer
+doesn't try to invent a synthetic global order; the caller's
+await boundaries are what define one.
+
 ## Unknowns
 
 The following behaviours are not fully specified yet and may change

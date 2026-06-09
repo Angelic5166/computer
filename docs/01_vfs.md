@@ -16,18 +16,22 @@ container, not on `WorkspaceOptions`).
 
 ```ts
 import { Workspace } from "@cloudflare/workspace";
-import { CloudflareContainerBackend } from "@cloudflare/workspace";
+import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
 
 new Workspace({
   storage:  ctx.storage,
   backends: [
     new CloudflareContainerBackend({
-      sandbox:   env.Sandbox,
-      sessionId: ctx.id.name,
+      container: () => this,
+      workspace: { binding: "ContainerExample", id: ctx.id.toString() },
     }),
   ],
 });
 ```
+
+`backends` is optional. Omit it to construct a filesystem-only
+Workspace where `fs` works against the local SQLite store but
+`shell` throws.
 
 `WorkspaceOptions` is `{ storage, backends, now? }`. There is no
 `root`, `sandbox`, or `sessionId` field on the host facade — sandbox

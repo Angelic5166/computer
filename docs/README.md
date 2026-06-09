@@ -17,9 +17,10 @@ The `@cloudflare/workspace` package provides an out of the box virtual filesyste
 It provides:
 
  - A fs API for working with files and directories compatible with Worker bindings.
- - Mounts for pre-filling data from R2 or Artifacts. **(not yet implemented)**
+ - R2-backed mounts for pre-filling read-only data into the workspace tree.
  - Durability over DO restarts for all file operations.
- - Container/Sandbox support via FUSE mount, mirroring the same filesystem in a container. The container side is the `wsd` daemon shipped in `@cloudflare/workspace-wsd`.
+ - A pluggable shell backend: a Cloudflare Container running the `wsd` FUSE daemon (full Linux userland) or a Dynamic Worker running [just-bash](https://github.com/vercel-labs/just-bash) (no container, broad textual tooling).
+ - Workspace constructable without a backend, for filesystem-only use cases.
  - Out-of-the-box tools for `@cloudflare/agents`. **(not yet implemented)**
 
 It comes with the following limitations:
@@ -36,17 +37,23 @@ Install the package into your Worker/Agent project:
 npm install @cloudflare/workspace
 ```
 
-The package ships a single entrypoint:
+The package ships several entrypoints:
 
-| Entrypoint | Where it runs |
+| Entrypoint | Purpose |
 | --- | --- |
-| `@cloudflare/workspace` | The Durable Object (your agent). |
+| `@cloudflare/workspace` | The Workspace facade, stub types, the R2 mount, and proxy classes. |
+| `@cloudflare/workspace/backends/container` | `CloudflareContainerBackend` and `withWorkspaceContainer`. Pulls in the wsd / capnweb sync plumbing. |
+| `@cloudflare/workspace/backends/worker` | `WorkerBackend` and the bundled just-bash shell. Pulls in the ~3 MB module bundle the Dynamic Worker loads. |
+| `@cloudflare/workspace/git` | Isomorphic-git glue for working with checkouts inside the workspace. |
+
+A consumer that only uses the container backend never imports the
+worker subpath, so the just-bash payload tree-shakes away.
 
 Wire types shared with the in-container service live in the sibling package `@cloudflare/workspace-rpc` (subpaths `./server`, `./client`, `./driver`).
 
 ### Sandbox container image
 
-The container needs the `wsd` daemon alongside a FUSE runtime. The recommended pattern mirrors [`examples/wsd-container/Dockerfile`](../examples/wsd-container/Dockerfile): build `wsd` as a single Node SEA binary (`npm run build:bin --workspace @cloudflare/workspace-wsd`), stage it into the image's build context, and copy it into a thin Debian base:
+The container needs the `wsd` daemon alongside a FUSE runtime. The recommended pattern mirrors [`examples/container/Dockerfile`](../examples/container/Dockerfile): build `wsd` as a single Node SEA binary (`npm run build:bin --workspace @cloudflare/workspace-wsd`), stage it into the image's build context, and copy it into a thin Debian base:
 
 ```dockerfile
 FROM --platform=linux/amd64 debian:stable-slim
@@ -66,13 +73,14 @@ EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/wsd"]
 ```
 
-`wsd`'s own default port is `45678`; the Cloudflare container backend pins the in-image listener to `8080`, which is what `examples/wsd-container/` uses. See [07. Injected Service](./07_injected_service.md) for the env vars (`PORT`, `MOUNT_POINT`, `FUSE_MOUNT`, `UPSTREAM_URL`, `EXEC_LOG_MAX_BYTES`) and the reverse-dial boot sequence.
+`wsd`'s own default port is `45678`; the Cloudflare container backend pins the in-image listener to `8080`, which is what `examples/container/` uses. See [07. Injected Service](./07_injected_service.md) for the env vars (`PORT`, `MOUNT_POINT`, `FUSE_MOUNT`, `UPSTREAM_URL`, `EXEC_LOG_MAX_BYTES`) and the reverse-dial boot sequence.
 
 ## Example
 
 ```ts
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { Workspace, CloudflareContainerBackend } from "@cloudflare/workspace";
+import { Workspace } from "@cloudflare/workspace";
+import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
 
 export class Agent extends AIChatAgent<Env> {
 	readonly workspace: Workspace;
@@ -83,8 +91,8 @@ export class Agent extends AIChatAgent<Env> {
 			storage:  this.ctx.storage, // DO storage → VFS lives here
 			backends: [
 				new CloudflareContainerBackend({
-					sandbox:   this.env.Sandbox, // DO namespace for the sandbox container
-					sessionId: this.name,        // routes to a specific sandbox instance
+					container: () => this,
+					workspace: { binding: "Agent", id: this.ctx.id.toString() },
 				}),
 			],
 		});
@@ -222,22 +230,23 @@ above, then dive into the area you're working on.
 | [09. Tool Interface (Agents)](./09_tool_interface.md) | Ready-made tools for `@cloudflare/agents`. **(not yet implemented)** |
 | [10. Project Layout](./10_project_layout.md) | Source tree of this package and how the pieces fit together. |
 | [11. Lifecycle](./11_lifecycle.md) | DO incarnations, container lifetime, capnweb session lifecycle, and hibernation. |
+| [12. Worker backend](./12_worker_backend.md) | Running the shell as just-bash inside a Dynamic Worker loaded through `env.LOADER`. |
 
 ## High-level API
 
 ```ts
 interface Workspace {
   fs:    WorkspaceFilesystem;     // 04_filesystem_interface.md
-  shell: WorkspaceShell;          // 05_shell_interface.md
+  shell: WorkspaceShell;          // 05_shell_interface.md, throws when no backend is configured
 
-  /** Push pending DO-side writes to the container. Resolves with the number of changes pushed. */
+  /** Push pending DO-side writes to the configured backend. Resolves with the entry count. */
   push():  Promise<number>;
-  /** Pull container-side writes back into the DO. Resolves with the number of changes pulled. */
-  pull():  Promise<number>;
+  /** Pull backend-side writes back into the DO. Resolves with { applied, skipped }. */
+  pull():  Promise<ApplyResult>;
   /** Lazy-connect over the configured backends. Idempotent; safe to call from `onStart`. */
   ready(): Promise<void>;
-  /** Capnweb stub for the remote RPC surface. */
-  stub:    WorkspaceStub;
+  /** Wrap this Workspace in a stub for crossing the Workers RPC boundary. */
+  stub():  WorkspaceStub;
   /** Tear down backend connections. */
   close(): Promise<void>;
 }

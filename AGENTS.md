@@ -117,6 +117,7 @@ file and add it to the list above.
 - **FUSE shim.** `packages/wsd` runs in the sandbox container. FUSE-
   backed tests only run on Linux and are skipped elsewhere
   automatically.
-- **Examples are real consumers.** `examples/think` and
-  `examples/wsd-container` exercise the public surface. If you change
-  a public API, update the examples in the same change.
+- **Examples are real consumers.** `examples/think`,
+  `examples/container`, and `examples/worker` exercise the public
+  surface. If you change a public API, update them in the same
+  change.

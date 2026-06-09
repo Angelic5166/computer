@@ -15,7 +15,7 @@ Requirements:
 - npm — this repo uses npm workspaces, not pnpm or yarn.
 - Linux with FUSE if you want to run `packages/wsd` end-to-end. The
   rest of the workspace builds and tests on macOS as well.
-- Docker, optionally, for `examples/wsd-container`.
+- Docker, optionally, for `examples/container`.
 
 Clone and install from the repo root:
 

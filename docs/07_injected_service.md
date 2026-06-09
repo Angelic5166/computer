@@ -21,7 +21,7 @@ npm run build:bin --workspace @cloudflare/workspace-wsd
 # → artifacts/wsd/wsd-macos-x64
 ```
 
-`examples/wsd-container/Dockerfile` is the canonical recipe for
+`examples/container/Dockerfile` is the canonical recipe for
 staging the binary into a container image.
 
 ## Responsibilities
@@ -62,7 +62,7 @@ The capnweb bootstrap interface is **`WorkspaceRPC`** (defined in
 
 ## Installing into your sandbox image
 
-The canonical recipe is `examples/wsd-container/Dockerfile`:
+The canonical recipe is `examples/container/Dockerfile`:
 
 ```dockerfile
 FROM --platform=linux/amd64 debian:stable-slim

@@ -23,7 +23,7 @@ workspace/
 │   ├── fs-tools/          # (planned) AI SDK file tools + FileStore
 │   └── git-tools/         # (planned) AI SDK git tools
 ├── examples/
-│   └── wsd-container/     # Reference container image for the wsd daemon
+│   └── container/     # Reference container image for the wsd daemon
 ├── docs/                  # This documentation set
 ├── PLAN.md                # Implementation roadmap
 └── package.json           # Workspace root (workspaces: packages/*, examples/*)
@@ -58,7 +58,8 @@ packages/workspace/
 │   ├── shell.ts                     # WorkspaceShell
 │   ├── backend.ts                   # Backend interface
 │   ├── backends/
-│   │   ├── cloudflare-container.ts  # Production backend
+│   │   ├── container/               # Cloudflare Container + wsd backend
+│   │   ├── worker/                  # Dynamic Worker + just-bash backend
 │   │   └── test.ts                  # In-process test backend
 │   ├── proxy.ts                     # WorkspaceProxy
 │   ├── proxy-stub.ts                # Client-side stub plumbing
@@ -195,7 +196,7 @@ Runnable examples live at the repo root, not inside any package:
 
 ```
 examples/
-└── wsd-container/        # Reference container image for wsd
+└── container/        # Reference container image for wsd
 ```
 
 The root `package.json` includes `examples/*` in its workspaces glob
