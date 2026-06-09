@@ -15,6 +15,7 @@
       // Built from the local Dockerfile, which COPYs the wsd binary
       // staged into ./build/ by the predev / predeploy hook.
       "image": "./Dockerfile",
+      "instance_type": "standard-2",
       "max_instances": 5
     }
   ],

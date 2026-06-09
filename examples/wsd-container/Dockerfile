@@ -13,13 +13,20 @@
 # real FUSE backend mounts; `wrangler dev` doesn't, so wsd falls
 # back to the userspace shim transparently.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.5 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.6 AS wsd
 
 FROM debian:stable-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fuse3 libfuse2t64 ca-certificates \
+      fuse3 libfuse2t64 ca-certificates curl gnupg git \
+ && mkdir -p /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=wsd /usr/local/bin/wsd /usr/local/bin/wsd
