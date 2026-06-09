@@ -1,7 +1,7 @@
 # 10. Project Layout
 
 > NOTE: This doc reflects the real monorepo layout. Packages marked
-> **(planned)** are not yet implemented; see `PLAN.md`.
+> **(planned)** are not yet implemented.
 
 The workspace ships as a monorepo. Each published package lives under
 `packages/`; runnable examples sit under `examples/`. The repo-root
@@ -25,7 +25,6 @@ workspace/
 ├── examples/
 │   └── container/     # Reference container image for the wsd daemon
 ├── docs/                  # This documentation set
-├── PLAN.md                # Implementation roadmap
 └── package.json           # Workspace root (workspaces: packages/*, examples/*)
 ```
 
@@ -183,12 +182,17 @@ produces the Node SEA single-file binary at
 AI SDK tools (`read`, `write`, `edit`, `grep`, `exec`) plus the
 `FileStore` abstraction the file-shaped ones drive. See
 [09. Tool Interface (Agents)](./09_tool_interface.md). Not
-implemented yet; tracked in `PLAN.md`.
+implemented yet.
 
-## `packages/git-tools/` — **(planned)**
+## Git
 
-Sibling of `fs-tools` for git workflows (clone, branch inspection,
-diff). Not implemented yet; tracked in `PLAN.md`.
+Git access ships through `workspace.git` on the main
+`@cloudflare/workspace` package rather than a separate package.
+Both a typed JavaScript API and an argv-driven entry point are
+available; the worker backend's shell isolate also exposes a
+built-in `git` command that forwards to the same dispatcher.
+See
+[13. Git interface](./13_git_interface.md).
 
 ## Examples
 
@@ -222,8 +226,7 @@ so each example can declare its own dependencies and scripts.
   extend `./tsconfig.json` to configure the build output.
 - **Biome.** Both linter and formatter are enabled in `biome.jsonc`
   at the repo root (`biome check` covers lint + format; `biome
-  format` formats only). No ESLint, no Prettier. The linter was
-  previously disabled; it was turned back on per `PLAN.md`.
+  format` formats only). No ESLint, no Prettier.
 - **esbuild.** Used by `packages/wsd/scripts/sea/bundle.mjs` to
   produce the single-file `wsd` SEA bundle. Application bundling is
   left to consumers.

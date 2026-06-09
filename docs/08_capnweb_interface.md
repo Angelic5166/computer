@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > This doc now reflects shipped code in `packages/rpc/`. Items marked
-> **(planned)** are roadmap targets tracked in `PLAN.md`.
+> **(planned)** are deferred work.
 
 [capnweb](https://github.com/cloudflare/capnweb) is the RPC framing used
 between the Durable Object and the in-container `wsd` workspace-server.
@@ -18,11 +18,10 @@ alternative). The interface served is `WorkspaceRPC`, defined in
   can't hold a socket. Default port is `45678`; it will become a
   build-time variable so hosts can pin a non-default port. The stale
   `/rpc` comment at `packages/rpc/src/client.ts:18` is scheduled for
-  cleanup (PLAN.md TODO-code).
+  cleanup.
 - **Framing.** capnweb text frames. Binary frames are unsupported.
   **(planned)** the server will fail the session loudly on the first
-  binary message (PLAN.md TODO-code); today the behaviour is
-  unspecified.
+  binary message; today the behaviour is unspecified.
 - **Streams.** `ReadableStream<…>` is a first-class capnweb value, used
   for `ChangeEntry` batches, object transfers, and the `exec` event
   stream.
@@ -102,8 +101,8 @@ interface SyncRPC {
   // Container → DO direction of object transfer. Throws
   // EUNKNOWN_HASH if any hash is unknown — callers must dedupe
   // and probe first. (planned: today the code returns an empty
-  // payload for missing hashes; see PLAN.md TODO-code for
-  // EUNKNOWN_HASH via createWorkspaceError.)
+  // payload for missing hashes; EUNKNOWN_HASH via
+  // createWorkspaceError is the deferred fix.)
   fetchObjects(hashes: Uint8Array[]):
     ReadableStream<{ hash: Uint8Array; bytes: Uint8Array }>;
 
@@ -227,7 +226,7 @@ the push/fetch cycle.
 
 ### Per-Workspace FIFO mutation queue (planned)
 
-**(planned, PLAN.md Important).** Mutating calls (`push`, `pushObjects`,
+**(planned).** Mutating calls (`push`, `pushObjects`,
 `exec` start, `killExec`, `disposeExec`) against a single Workspace
 will be serialised through a FIFO queue so that concurrent peers can't
 interleave half-applied batches. Read-only calls (`fetchChanges`,
@@ -248,8 +247,8 @@ Chatty commands self-regulate the same way they would under a slow
 See SUMMARY §0 (commit 89b4717) for why we landed on pull-based
 backpressure rather than the originally-planned in-memory ring.
 
-**(planned, PLAN.md TODO-code)** the host-side exec handle will grow
-`pause()` / `resume()` for callers that want to throttle without
+**(planned)** the host-side exec handle will grow `pause()` /
+`resume()` for callers that want to throttle without
 relying on stream-pull semantics. See
 [05. Shell Interface](./05_shell_interface.md).
 
@@ -297,7 +296,7 @@ type WireError = {
 | Code | Meaning |
 | --- | --- |
 | `ENOENT` | Path does not exist on the receiver (covers ignored paths, which are invisible to `Workspace.fs`), or `getExec` / `disposeExec` referenced an unknown id. |
-| `EUNKNOWN_HASH` | **(reserved, planned)** `fetchObjects` or `pushObjects` referenced a hash the receiver has no record of. Reserved in `WireErrorCode` but not raised today; `pushObjects` should throw it via `createWorkspaceError` (PLAN.md TODO-code). |
+| `EUNKNOWN_HASH` | **(reserved, planned)** `fetchObjects` or `pushObjects` referenced a hash the receiver has no record of. Reserved in `WireErrorCode` but not raised today; `pushObjects` should throw it via `createWorkspaceError`. |
 | `EEXEC_BUSY` | `exec` was called with an `id` that's already in use by a live run. |
 | `ELOG_TRUNCATED` | `getExec` resume point is older than the retained log. |
 | `ESHUTDOWN` | **(reserved)** Server is shutting down; reconnect after the next boot. Not raised today. |
@@ -309,8 +308,7 @@ capnweb forwards own-enumerable properties verbatim, and
 `workspace-fs/errors.ts` only enumerates fs codes (not wire codes), so
 the wire `code` survives by accident on fs errors but is **not yet
 guaranteed** for sync / shell errors. Making the typed rethrow with
-`code` preservation a contract is a `code-fix` target (PLAN.md
-TODO-code).
+`code` preservation a contract is a deferred follow-up.
 
 ## Observability
 
@@ -320,9 +318,9 @@ callback fired once per RPC with `{ rpc, durationMs, ok, code? }`.
 - The composite `createWorkspaceClient` does **not** accept
   `onRPCEvent` today.
 - The host `Workspace` class has **no** `onRpcEvent` option today.
-- Frame-size metrics (`bytesIn` / `bytesOut`) are **(planned,
-  PLAN.md Revisit)** — capnweb does not currently surface per-call
-  frame sizes through its stub API, so the hook can't fill them in.
+- Frame-size metrics (`bytesIn` / `bytesOut`) are **(planned)**
+  — capnweb does not currently surface per-call frame sizes
+  through its stub API, so the hook can't fill them in.
 
 Server-side, structured records land in `LOG_FILE` (see
 [07. Injected Service](./07_injected_service.md)). Neither side bakes

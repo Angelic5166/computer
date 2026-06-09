@@ -3,9 +3,8 @@
 > [!NOTE]
 > This document tracks the shipped wire shape in `packages/dofs/src/sync/*`
 > and `packages/rpc/src/{interface,server,sync-driver}.ts`. A handful of
-> claims describe roadmap targets called out in `PLAN.md`; those are
-> marked inline. When code and doc disagree, code wins — file a fix
-> against whichever side is wrong.
+> claims describe deferred work; those are marked inline. When code and
+> doc disagree, code wins — file a fix against whichever side is wrong.
 
 The workspace keeps two copies of the filesystem tree in sync:
 

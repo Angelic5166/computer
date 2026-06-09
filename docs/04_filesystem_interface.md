@@ -106,7 +106,7 @@ directories; `force: true` silences `ENOENT`.
 
 > The `recursive?: true` / `force?: true` literal types are intentional
 > today and reject `false`. Widening to `boolean` for `node:fs/promises`
-> parity is tracked in `PLAN.md` (*TODO — code*).
+> parity is a deferred follow-up.
 
 ```ts
 // Single file.

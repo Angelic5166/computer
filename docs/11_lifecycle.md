@@ -7,7 +7,7 @@
 > section is **forward-looking** — today's code uses `server.accept()`
 > on the DO side, not `ctx.acceptWebSocket()`, so the DO is not
 > hibernating yet. The rest of this document describes shipped
-> behaviour; the durability gaps it surfaces are tracked in `PLAN.md`.
+> behaviour; the durability gaps it surfaces are deferred work.
 
 ## Architecture
 
@@ -129,8 +129,7 @@ The critical asymmetry: the **container's VFS is process-lifetime
 in-memory**, while the **DO's VFS is durable SQLite**. A container
 restart loses container-side state. Sync via `UPSTREAM_URL` (which
 the Cloudflare backend wires automatically) is what brings state back
-on the next push/pull round. The implications for watermark
-reconciliation are spelled out in `PLAN.md` §3.
+on the next push/pull round.
 
 ## Capnweb lifecycle
 
@@ -180,7 +179,6 @@ package WebSocket and require the `wsd` process to be live.
 The death case today is **not handled** — the `Workspace` keeps its
 `#handle` reference pointing at the dead session, and the next RPC
 call throws. The caller is expected to reconstruct the workspace.
-`PLAN.md` §1 tracks the fix.
 
 ### What an in-flight RPC looks like across a transport failure
 
@@ -374,13 +372,13 @@ between agent turns, and it's exactly where hibernation pays off.
 
 ### What about the alternative — invert the dial direction?
 
-`PLAN.md` discusses adopting PartySocket for reconnect/backoff, which
-would require the DO to be the WebSocket *client* dialing `wsd`'s
+Adopting PartySocket for reconnect/backoff would require the DO
+to be the WebSocket *client* dialing `wsd`'s
 `/ws` endpoint. That model is appealing for reconnect, but
 hibernatable WebSockets only work server-side via
 `ctx.acceptWebSocket()` — there is no hibernation API for outbound
 client sockets. **Inverting the dial direction permanently forecloses
-hibernation.** That trade-off is why the recommendation in `PLAN.md`
+hibernation.** That trade-off is why the current recommendation
 is to keep the DO as the WS server and roll a small in-house
 reconnect wrapper rather than carry PartySocket.
 
@@ -388,7 +386,7 @@ reconnect wrapper rather than carry PartySocket.
 
 The matrix below summarises how each lifecycle component reacts to
 the others. Italic entries describe behaviour that depends on
-`PLAN.md` items not yet shipped.
+items not yet shipped.
 
 | Event | DO | Container | capnweb session |
 | --- | --- | --- | --- |
@@ -405,7 +403,7 @@ The recurring theme: **DO storage is the only durable thing in this
 diagram.** Everything else is replayable from the rev counters living
 in `_vfs_watermark`, provided the connect path knows how to detect
 state mismatch and reset cursors. That detection is the load-bearing
-durability work captured in `PLAN.md`.
+durability work still to ship.
 
 ## See also
 
@@ -415,5 +413,3 @@ durability work captured in `PLAN.md`.
   sequence and the egress-interception dial-back.
 - [08. Capnweb Interface](./08_capnweb_interface.md) — RPC surface
   and transport assumptions.
-- `PLAN.md` (repo root) — the durability gaps this lifecycle picture
-  surfaces, and the order to close them.

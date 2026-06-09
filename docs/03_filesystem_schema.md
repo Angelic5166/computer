@@ -201,7 +201,7 @@ has acknowledged them, no future pull needs to replay them. Today
 `writeWatermark` only updates `_vfs_watermark`; there is no
 `DELETE FROM vfs_changes` anywhere in the package, so the table grows
 unboundedly with delete activity. Cheap to add once the apply path
-becomes push-atomic; tracked in `PLAN.md`.
+becomes push-atomic.
 
 ### `_vfs_watermark` — sync state
 

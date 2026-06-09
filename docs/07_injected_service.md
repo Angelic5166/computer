@@ -3,7 +3,7 @@
 > [!NOTE]
 > This doc now reflects shipped code in `packages/wsd/` and
 > `packages/workspace/src/backends/`. Items marked **(planned)** are
-> roadmap targets tracked in `PLAN.md`.
+> deferred work.
 
 The "injected service" is the workspace daemon that runs *inside* the
 sandbox container. It owns the FUSE mount, the in-container VFS, the
@@ -187,7 +187,7 @@ Today:
   "skip the mount entirely" path is the explicit `FUSE_MOUNT=none`
   opt-out.
 
-**Planned** (tracked in `PLAN.md`):
+**Planned**:
 
 - Soft-fail on FUSE-detect failure: the server still starts, exposes
   RPC, and reports `fuseActive=false` via `/__wsd/info`. Whether
