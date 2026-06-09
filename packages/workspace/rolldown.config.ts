@@ -25,6 +25,8 @@ export default defineConfig({
   input: {
     index: "src/index.ts",
     git: "src/git/index.ts",
+    "backends/container/index": "src/backends/container/index.ts",
+    "backends/worker/index": "src/backends/worker/index.ts",
     "observe/cloudflare": "src/observe/cloudflare.ts",
   },
   external: [
@@ -33,6 +35,7 @@ export default defineConfig({
     "@platformatic/vfs",
     "isomorphic-git",
     /^isomorphic-git\//,
+    "just-bash",
     "node:crypto",
     "node:events",
   ],

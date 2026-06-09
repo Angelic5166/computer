@@ -12,7 +12,8 @@
 // overload routing, stat ENOENT propagation, close() idempotency.
 
 import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
-import { describe, expect, it } from "vitest";
+import { enableStubTracking, stubSnapshot } from "@cloudflare/workspace-rpc/debug";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
 import { WorkspaceExecHandleStub, WorkspaceFilesystemStub, WorkspaceShellStub } from "./stub.js";
@@ -86,6 +87,13 @@ function backend(
   };
 }
 
+function snapshotOf(names: string[]): Record<string, number> {
+  const snap = stubSnapshot();
+  const out: Record<string, number> = {};
+  for (const name of names) out[name] = snap[name] ?? 0;
+  return out;
+}
+
 async function withStub<T>(
   fn: (ws: Workspace) => T | Promise<T>,
   options?: { backend?: WorkspaceBackend },
@@ -145,12 +153,12 @@ describe("WorkspaceStub", () => {
   });
 
   it("shell.exec auto-reconnects after the backend signals closed", async () => {
-    // Reproduces the "Workspace not connected — await ready() first" bug:
-    // when the underlying transport drops mid-session, the Workspace
-    // clears its cached shell. A subsequent stub.shell.exec call would
-    // hit the synchronous getter on a torn-down Workspace and throw
-    // instead of rebuilding the connection. The stub must await
-    // ready() first so a drop is healed transparently.
+    // When the underlying transport drops mid-session, the
+    // Workspace clears its cached BackendHandle for that backend
+    // id. The next stub.shell.exec call must dial a fresh handle
+    // through the lazy-connect path rather than reuse the dead
+    // one. Pin the heal so a transport drop is invisible to the
+    // caller.
     let signalClosed!: () => void;
     let connectCount = 0;
     let execCalls = 0;
@@ -173,6 +181,7 @@ describe("WorkspaceStub", () => {
     };
     const reconnectBackend: WorkspaceBackend = {
       id: "reconnect",
+      type: "fake",
       async connect(): Promise<BackendHandle> {
         connectCount += 1;
         // First connect arms a controllable `closed` promise; later
@@ -195,19 +204,20 @@ describe("WorkspaceStub", () => {
       backends: [reconnectBackend],
     });
     try {
-      await ws.ready();
+      // Backends connect lazily on first use; ready(id) is the
+      // documented way to pre-warm one.
+      await ws.ready("reconnect");
       expect(connectCount).toBe(1);
       const stub = ws.stub();
 
       // Simulate a mid-session transport drop. The Workspace's
-      // `closed` listener clears #handle / #shell / #readyPromise
+      // `closed` listener drops the cached handle for this id
       // in a microtask, so yield once before exercising the stub.
       signalClosed();
       await new Promise((r) => setTimeout(r, 0));
 
-      // Before the fix, this throws "Workspace not connected".
-      // After the fix, the stub awaits ready() and gets a fresh
-      // backend handle.
+      // The next stub.shell.exec call enters the lazy connect
+      // path against the now-empty handle cache and reconnects.
       const handle = await stub.shell.exec("noop");
       const res = await handle.result();
       expect(res.exitCode).toBe(0);
@@ -216,6 +226,73 @@ describe("WorkspaceStub", () => {
     } finally {
       await ws.close();
     }
+  });
+
+  describe("disposal cascade", () => {
+    // The `fs` and `shell` sub-stubs are owned by the parent stub.
+    // Workers RPC exposes them as getters, so a caller can't reach
+    // them as independent stubs; their lifetime is bounded by the
+    // parent's. WorkspaceStub[Symbol.dispose] is what enforces that
+    // bound — without the cascade, every getWorkspace() leaks two
+    // sub-stubs on the peer side.
+    //
+    // The WorkerBackend reaches the fs half via `stub().fs` and
+    // depends on this cascade for its own disposal contract; pin
+    // it here so a future refactor that drops the cascade fails
+    // loudly.
+    beforeAll(() => {
+      enableStubTracking();
+    });
+
+    it("disposing the parent stub releases fs and shell sub-stubs", async () => {
+      await withStub(async (ws) => {
+        const before = snapshotOf([
+          "WorkspaceStub",
+          "WorkspaceFilesystemStub",
+          "WorkspaceShellStub",
+        ]);
+        {
+          using stub = ws.stub();
+          // Touch both halves so any lazy construction lands.
+          expect(stub.fs).toBeInstanceOf(WorkspaceFilesystemStub);
+          expect(stub.shell).toBeInstanceOf(WorkspaceShellStub);
+          const live = snapshotOf([
+            "WorkspaceStub",
+            "WorkspaceFilesystemStub",
+            "WorkspaceShellStub",
+          ]);
+          expect(live.WorkspaceStub).toBe(before.WorkspaceStub + 1);
+          expect(live.WorkspaceFilesystemStub).toBe(before.WorkspaceFilesystemStub + 1);
+          expect(live.WorkspaceShellStub).toBe(before.WorkspaceShellStub + 1);
+        }
+        // Out of scope — `using` ran Symbol.dispose on the parent,
+        // which cascades to fs and shell.
+        const after = snapshotOf([
+          "WorkspaceStub",
+          "WorkspaceFilesystemStub",
+          "WorkspaceShellStub",
+        ]);
+        expect(after).toEqual(before);
+      });
+    });
+
+    it("stub().fs survives long enough for the backend to hand it off", async () => {
+      // The WorkerBackend pattern is:
+      //   using stub = workspace.stub();
+      //   await fetcher.exec(input, stub.fs);
+      // The fs reference must remain a live RpcTarget for the
+      // duration of the call. Verify that reading `.fs` doesn't
+      // dispose the parent and that the same getter returns the
+      // same instance on repeat access.
+      await withStub(async (ws) => {
+        using stub = ws.stub();
+        const first = stub.fs;
+        const second = stub.fs;
+        expect(first).toBe(second);
+        const live = snapshotOf(["WorkspaceFilesystemStub"]);
+        expect(live.WorkspaceFilesystemStub).toBeGreaterThanOrEqual(1);
+      });
+    });
   });
 
   it("shell.exec returns an eagerly-spawned handle", async () => {

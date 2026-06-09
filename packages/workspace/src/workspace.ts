@@ -35,8 +35,11 @@ export interface WorkspaceOptions {
   storage: DurableObjectStorageLike;
 
   // Backends are tried in declared order. The first one whose
-  // connect() resolves wins; the rest are not consulted.
-  backends: WorkspaceBackend[];
+  // connect() resolves wins; the rest are not consulted. Optional:
+  // omit to construct a filesystem-only Workspace where the
+  // SQLite-backed fs surface is fully usable but the shell half
+  // throws a clear error on access.
+  backends?: WorkspaceBackend[];
 
   // Clock used for mtime / last_seen on local FS writes. Defaults
   // to Date.now. Override for deterministic tests.
@@ -53,32 +56,14 @@ export interface WorkspaceOptions {
   mounts?: Record<string, MountValue>;
 
   // Observer that receives one span per workspace operation: a
-  // `workspace.connect` per backend connect attempt, `workspace.sync.push`
-  // / `workspace.sync.pull` per sync call, `workspace.shell.exec` per
-  // exec, and `workspace.fs.<op>` per filesystem call routed through the
-  // stub. The default is a no-op so the package has no observability cost
-  // when callers do not opt in. See `./observe.ts` for the contract and
-  // the adapter subpaths for the Cloudflare runtime and OpenTelemetry.
+  // `workspace.connect` per backend connect attempt,
+  // `workspace.sync.push` / `workspace.sync.pull` per sync call,
+  // `workspace.shell.exec` per exec, and `workspace.fs.<op>` per
+  // filesystem call routed through the stub. The default is a
+  // no-op so the package has no observability cost when callers
+  // do not opt in. See `./observe.ts` for the contract and the
+  // adapter subpaths for the Cloudflare runtime and OpenTelemetry.
   observer?: WorkspaceObserver;
-
-  // Bounded retry policy for ready(). When omitted, ready() runs
-  // the backend list once and surfaces the first failure — the
-  // shipped behaviour before retries existed. When set, a transient
-  // failure on every backend triggers a wait + retry, up to
-  // `attempts` total tries with exponential backoff. The delay
-  // starts at `initialDelayMs` and doubles each round, capped at
-  // `maxDelayMs`.
-  reconnect?: ReconnectOptions;
-}
-
-export interface ReconnectOptions {
-  // Total connect() attempts across the backend list. 1 means
-  // no retry (one pass). Default 1.
-  attempts: number;
-  // First backoff delay in ms. Doubles each round up to maxDelayMs.
-  initialDelayMs: number;
-  // Cap on the per-attempt backoff delay.
-  maxDelayMs: number;
 }
 
 export class Workspace {
@@ -90,32 +75,55 @@ export class Workspace {
    */
   #provider: SQLiteWorkspaceProvider | undefined;
   readonly #backends: WorkspaceBackend[];
-  readonly #reconnect: ReconnectOptions;
+  readonly #backendsById: Map<string, WorkspaceBackend>;
+  readonly #defaultBackendId: string | undefined;
   readonly #observer: WorkspaceObserver;
   readonly #now: () => number;
   readonly #mounts: Map<string, Mount>;
   readonly #mountIndex: MountIndex;
-  #handle: BackendHandle | undefined;
-  #shell: WorkspaceShell | undefined;
+  // Per-backend handle cache. Filled lazily on first use of each
+  // backend; a closed transport drops just that backend's entry,
+  // leaving the others warm.
+  readonly #handles = new Map<string, BackendHandle>();
+  // In-flight connect promises keyed by backend id, so concurrent
+  // callers for the same backend share one connect pass.
+  readonly #connecting = new Map<string, Promise<BackendHandle>>();
+  // Per-backend WorkspaceShell facades. Constructed alongside each
+  // handle; reused for the life of the handle.
+  readonly #shells = new Map<string, WorkspaceShell>();
   #readyPromise: Promise<void> | undefined;
-  // FIFO that serializes mutating entry points (push, pull, and the
-  // shell exec bracket which goes through them). Reads bypass the
-  // queue entirely — they hit the local store directly through
-  // Workspace.fs. The queue is a single tail-promise: each new caller
-  // chains its work onto the tail and updates it. See docs/02 "Concurrent
-  // mutators".
-  #mutationTail: Promise<unknown> = Promise.resolve();
+  // Per-backend FIFOs that serialize mutating entry points (push,
+  // pull, and the shell exec bracket which goes through them) for
+  // that backend. A push to backend A does not block exec on
+  // backend B. Reads bypass the queue entirely — they hit the
+  // local store directly through Workspace.fs. Each value is a
+  // single tail-promise; each caller chains its work onto the tail
+  // and updates it. See docs/02 "Concurrent mutators".
+  readonly #mutationTails = new Map<string, Promise<unknown>>();
 
   constructor(options: WorkspaceOptions) {
-    if (options.backends.length === 0) {
-      throw new Error("Workspace requires at least one backend");
-    }
     this.#now = options.now ?? Date.now;
     this.#db = new Database(options.storage);
     initializeSchema(this.#db, this.#now);
     this.#fs = new WorkspaceFilesystem(this.#db, { now: this.#now });
-    this.#backends = options.backends.slice();
-    this.#reconnect = options.reconnect ?? { attempts: 1, initialDelayMs: 0, maxDelayMs: 0 };
+    this.#backends = (options.backends ?? []).slice();
+    // Reject duplicate backend ids at construction. The Workspace
+    // selects backends by id at exec / push / pull time; two
+    // backends sharing a string would make the selector
+    // non-deterministic in a way that's almost certainly a
+    // configuration bug.
+    this.#backendsById = new Map();
+    for (const backend of this.#backends) {
+      if (this.#backendsById.has(backend.id)) {
+        throw new Error(
+          `Workspace: duplicate backend id ${JSON.stringify(backend.id)}. ` +
+            "Pass an explicit `id` on each backend's constructor options to " +
+            "distinguish them.",
+        );
+      }
+      this.#backendsById.set(backend.id, backend);
+    }
+    this.#defaultBackendId = this.#backends[0]?.id;
     this.#observer = options.observer ?? noopObserver;
     this.#mounts = buildMountRegistry(options.mounts, {
       sessionId: options.sessionId,
@@ -204,78 +212,106 @@ export class Workspace {
     return this.#provider;
   }
 
-  // Shell facade. Throws if called before ready() resolves.
-  // exec() brackets the spawn with push() / pull(); see shell.ts.
+  // Shell facade. Throws if no backend was configured (the
+  // Workspace was constructed for filesystem-only use).
+  //
+  // The returned facade is a router: each method picks the right
+  // backend (the default, or one named through ExecOptions.backend)
+  // and forwards to that backend's ShellRPC. Backend connect is
+  // lazy — the first exec / get for a backend dials it.
   get shell(): WorkspaceShell {
-    if (!this.#shell) {
-      throw new Error("Workspace not connected — await ready() first");
+    if (this.#backends.length === 0) {
+      throw new Error(
+        "Workspace has no backend configured — the shell is not available. " +
+          "Pass `backends` to the Workspace constructor to enable shell.exec.",
+      );
     }
-    return this.#shell;
+    return this.#routedShell();
   }
 
-  // Walk the backends in declared order. Caches the first
-  // successful BackendHandle so subsequent .shell / .close calls
-  // reuse it. ready() is idempotent; multiple callers share
-  // the same in-flight connection attempt.
-  ready(): Promise<void> {
-    if (this.#readyPromise) return this.#readyPromise;
-    const ready = (async () => {
-      await this.#connect();
-      // Index after the backend is wired so reads of mounted paths
-      // are populated before the first push() inside an exec()
-      // bracket can ship them.
-      await this.#mountIndex.ensureIndexed();
-    })();
-    this.#readyPromise = ready;
-    ready.catch(() => {
-      // A failed connection attempt must not poison this Workspace forever.
-      // The next ready()/push()/pull()/exec should re-enter #connect(), giving
-      // backend factories a chance to pick a fresh transport.
-      if (this.#readyPromise === ready) this.#readyPromise = undefined;
-    });
-    return ready;
+  // ensureMountsIndexed() is the only thing ready() does today;
+  // backends connect lazily on first use. The promise is still
+  // cached so concurrent ready() calls share one index pass; a
+  // failed pass is uncached so the next call retries.
+  //
+  // Pass an explicit backend id to pre-warm one. Pass
+  // `{ all: true }` to dial every backend in parallel — useful
+  // from an agent's `onStart` hook.
+  ready(options?: string | { all?: boolean }): Promise<void> {
+    if (this.#readyPromise === undefined) {
+      const pass = this.#mountIndex.ensureIndexed();
+      this.#readyPromise = pass;
+      pass.catch(() => {
+        // A failed mount-index pass must not poison this
+        // Workspace forever. The next ready() should re-enter
+        // ensureIndexed() and try again.
+        if (this.#readyPromise === pass) this.#readyPromise = undefined;
+      });
+    }
+    const indexPromise = this.#readyPromise;
+    if (options === undefined) return indexPromise;
+    if (typeof options === "string") {
+      const id = options;
+      return (async () => {
+        await indexPromise;
+        await this.#handleFor(id);
+      })();
+    }
+    if (options.all) {
+      return (async () => {
+        await indexPromise;
+        await Promise.all(this.#backends.map((b) => this.#handleFor(b.id)));
+      })();
+    }
+    return indexPromise;
   }
 
   // Wrap this workspace in a WorkspaceStub so it can be handed
   // across the Workers-RPC boundary (e.g. returned from a DO RPC
   // method). The stub is a lazy RpcTarget — it doesn't own any
   // resources itself; it just delegates back to this workspace.
-  // Throws if called before ready() resolves, because the inner
-  // .shell getter does.
   stub(): WorkspaceStub {
-    // Touch .shell so the not-connected error surfaces here
-    // rather than on the first RPC method call.
-    void this.shell;
     return new WorkspaceStub(this);
   }
 
-  // Sync the local store with the connected backend.
+  // Sync the local store with a configured backend.
   //
   // push() ships everything the host has written since the last
-  // push to wsd; pull() applies everything wsd has produced since
-  // the last pull. Both are explicit — the package doesn't run a
-  // background loop. WorkspaceShell brackets exec() automatically;
-  // call these directly for FS-only flows that need to hand off to
-  // the container via a tool other than exec.
+  // push to that backend; pull() applies everything the backend
+  // has produced since the last pull. Both are explicit — the
+  // package doesn't run a background loop. WorkspaceShell.exec
+  // brackets each call automatically against the backend it
+  // selects; reach for push() / pull() directly only when an
+  // FS-only flow needs the bracket without an exec.
   //
-  // push() returns the number of entries shipped to the remote so
-  // a polling loop can decide whether to tick again. pull() returns
-  // the dofs ApplyResult { applied, skipped } — `applied` is the
-  // number of entries written into the local store, `skipped`
-  // surfaces container-side writes the apply path rejected because
-  // they targeted a read-only mount root. Callers that don't care
-  // about read-only enforcement read `applied`; the shell exec
-  // bracket folds `skipped` into its ExecResult so users see what
-  // stayed authoritative on the mount.
-  push(): Promise<number> {
-    return this.#serialize(() =>
+  // `id` selects which backend to push to / pull from. Omitting
+  // it picks the default (the first backend in the list).
+  //
+  // push() returns the number of entries shipped to the backend.
+  // pull() returns the dofs ApplyResult { applied, skipped } —
+  // `applied` is the number of entries written into the local
+  // store, `skipped` surfaces remote-side writes the apply path
+  // rejected because they targeted a read-only mount root.
+  //
+  // Both methods emit a `workspace.sync.push` / `workspace.sync.pull`
+  // span on the configured observer, tagged with the resolved
+  // backend id and the entry count.
+  push(id?: string): Promise<number> {
+    return this.#serialize(id, (resolvedId) =>
       withSpan(
         this.#observer,
         "workspace.sync.push",
-        {},
+        { "workspace.sync.backend": resolvedId },
         async () => {
-          const handle = await this.#readyHandle();
-          return pushOnce(this.#db, handle.rpc.sync);
+          if (resolvedId === undefined) return 0;
+          const handle = await this.#handleFor(resolvedId);
+          // A backend that reuses the host store as its sole
+          // source of truth has nothing to ship and no remote to
+          // ship to. Short-circuit so the shell exec bracket can
+          // keep calling push() unconditionally without paying
+          // for it.
+          if (handle.sync === "none") return 0;
+          return pushOnce(this.#db, handle.rpc.sync, resolvedId);
         },
         (span, outcome) => {
           if (outcome.ok) span.setAttribute("workspace.sync.pushed", outcome.value);
@@ -284,15 +320,17 @@ export class Workspace {
     );
   }
 
-  pull(): Promise<ApplyResult> {
-    return this.#serialize(() =>
+  pull(id?: string): Promise<ApplyResult> {
+    return this.#serialize(id, (resolvedId) =>
       withSpan(
         this.#observer,
         "workspace.sync.pull",
-        {},
+        { "workspace.sync.backend": resolvedId },
         async () => {
-          const handle = await this.#readyHandle();
-          return pullOnce(this.#db, handle.rpc.sync);
+          if (resolvedId === undefined) return { applied: 0, skipped: [] };
+          const handle = await this.#handleFor(resolvedId);
+          if (handle.sync === "none") return { applied: 0, skipped: [] };
+          return pullOnce(this.#db, handle.rpc.sync, resolvedId);
         },
         (span, outcome) => {
           if (!outcome.ok) return;
@@ -303,124 +341,202 @@ export class Workspace {
     );
   }
 
-  // Resolve a live BackendHandle, healing a torn-down session if the
-  // transport dropped between an earlier ready() and now. ready() is
-  // idempotent on a live handle; the second pass only runs when the
-  // `closed` listener wiped #handle / #readyPromise out from under us
-  // after the first call resolved. Surfacing the original "not
-  // connected" error after a second failed pass keeps the caller's
-  // failure mode unchanged when the backend genuinely can't reach a
-  // peer.
-  async #readyHandle(): Promise<BackendHandle> {
-    await this.ready();
-    if (!this.#handle) {
-      await this.ready();
-    }
-    if (!this.#handle) throw new Error("Workspace not connected");
-    return this.#handle;
-  }
-
-  // Tail-promise FIFO. Each call chains onto the existing tail so
-  // it can't start until every queued mutation ahead of it has
-  // resolved (or rejected). Rejections are not contagious: we swallow
-  // the rejection here so a failing mutation doesn't poison the rest
-  // of the queue — the caller still sees the original rejection via
-  // the returned promise.
-  #serialize<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.#mutationTail.then(fn, fn);
-    this.#mutationTail = run.then(
-      () => undefined,
-      () => undefined,
+  // Per-backend mutation FIFO. The shell exec bracket
+  // (push → spawn → pull) and the public push() / pull() methods
+  // route through this; reads bypass it entirely. A push to
+  // backend A does not block exec on backend B because each id
+  // gets its own tail-promise. The undefined id (filesystem-only
+  // path through push/pull) shares one slot.
+  //
+  // Rejections are not contagious: the catch arm here swallows
+  // failures so a failing mutation doesn't poison the rest of
+  // the queue — the caller still sees the original rejection
+  // through the returned promise.
+  #serialize<T>(
+    id: string | undefined,
+    fn: (resolvedId: string | undefined) => Promise<T>,
+  ): Promise<T> {
+    const resolved = this.#resolveBackendId(id);
+    const slot = resolved ?? "";
+    const tail = this.#mutationTails.get(slot) ?? Promise.resolve();
+    const run = tail.then(
+      () => fn(resolved),
+      () => fn(resolved),
+    );
+    this.#mutationTails.set(
+      slot,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
     );
     return run;
   }
 
+  // Resolve an exec / push / pull caller's id argument to a
+  // concrete backend id. Returns undefined for a filesystem-only
+  // workspace; throws on an unknown id. Omitted ids fall through
+  // to the first backend in the list (the default).
+  #resolveBackendId(id: string | undefined): string | undefined {
+    if (this.#backends.length === 0) return undefined;
+    const target = id ?? this.#defaultBackendId;
+    if (target === undefined) return undefined;
+    if (!this.#backendsById.has(target)) {
+      throw new Error(
+        `Workspace: no backend with id ${JSON.stringify(target)}. ` +
+          `Configured backends: ${[...this.#backendsById.keys()].map((k) => JSON.stringify(k)).join(", ") || "<none>"}.`,
+      );
+    }
+    return target;
+  }
+
   async close(): Promise<void> {
-    if (this.#handle) {
-      try {
-        await this.#handle.close();
-      } finally {
-        this.#handle = undefined;
-        this.#shell = undefined;
-        this.#readyPromise = undefined;
-      }
-    }
-  }
-
-  async #connect(): Promise<void> {
-    const { attempts, initialDelayMs, maxDelayMs } = this.#reconnect;
-    let delay = initialDelayMs;
-    let lastError: Error | undefined;
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      try {
-        await this.#connectOnce();
-        return;
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        if (attempt === attempts) break;
-        await sleep(delay);
-        delay = Math.min(delay * 2 || 1, maxDelayMs);
-      }
-    }
-    // Throwing the last attempt's error preserves the per-backend
-    // summary the pass produced — the caller still sees which
-    // backend failed and why.
-    throw lastError;
-  }
-
-  async #connectOnce(): Promise<void> {
-    const errors: Array<{ id: string; error: unknown }> = [];
-    for (const backend of this.#backends) {
-      try {
-        const handle = await withSpan(
-          this.#observer,
-          "workspace.connect",
-          { "workspace.backend.id": backend.id },
-          () => backend.connect(),
-        );
-        // Reconcile watermarks before publishing the handle. If the
-        // remote restarted between our pushes / fetches it has lost
-        // state we thought it had; reset the local cursors so the
-        // next tick rebaselines. Done eagerly on connect because
-        // pushOnce's localRev <= sincePush early-return otherwise
-        // hides the mismatch.
-        await reconcileWatermarks(this.#db, handle.rpc.sync);
-        this.#handle = handle;
-        // Workspace satisfies the Sync interface in shell.ts via
-        // its public push() / pull() methods.
-        this.#shell = new WorkspaceShell(handle.rpc.shell, this, this.#observer);
-        // Tear down our caches if the transport drops mid-session.
-        // Backends without a `closed` promise (in-process fakes) opt
-        // out by omitting it; we only react when it's wired.
-        if (handle.closed) {
-          handle.closed
-            .catch(() => {})
-            .then(() => {
-              // Only clear if this handle is still the current one.
-              // A close() that already ran will have nulled #handle,
-              // and a subsequent ready() may have installed a new one.
-              if (this.#handle === handle) {
-                this.#handle = undefined;
-                this.#shell = undefined;
-                this.#readyPromise = undefined;
-              }
-            });
+    // Close every cached handle in parallel. Drop caches before
+    // awaiting so a subsequent ready() / exec sees an empty slate
+    // and rebuilds against fresh handles.
+    const handles = [...this.#handles.values()];
+    this.#handles.clear();
+    this.#shells.clear();
+    this.#connecting.clear();
+    this.#readyPromise = undefined;
+    await Promise.all(
+      handles.map(async (h) => {
+        try {
+          await h.close();
+        } catch {
+          // close() is best-effort; a transport that's already
+          // gone shouldn't take the workspace down with it.
         }
-        return;
-      } catch (error) {
-        errors.push({ id: backend.id, error });
-      }
+      }),
+    );
+  }
+
+  // Lazy backend connect. Concurrent callers for the same id
+  // share one in-flight promise. The resolved handle is cached
+  // until close() or the backend's `closed` promise fires.
+  #handleFor(id: string): Promise<BackendHandle> {
+    const cached = this.#handles.get(id);
+    if (cached !== undefined) return Promise.resolve(cached);
+    const inflight = this.#connecting.get(id);
+    if (inflight !== undefined) return inflight;
+    const backend = this.#backendsById.get(id);
+    if (backend === undefined) {
+      return Promise.reject(new Error(`Workspace: no backend with id ${JSON.stringify(id)}`));
     }
-    const summary = errors
-      .map(
-        ({ id, error }) => `  - ${id}: ${error instanceof Error ? error.message : String(error)}`,
-      )
-      .join("\n");
-    throw new Error(`Workspace: no backend reachable\n${summary}`);
+    const promise = (async () => {
+      const handle = await withSpan(
+        this.#observer,
+        "workspace.connect",
+        { "workspace.backend.id": id, "workspace.backend.type": backend.type },
+        () => backend.connect(),
+      );
+      // Reconcile watermarks before publishing the handle. If the
+      // remote restarted between our pushes / fetches it has lost
+      // state we thought it had; reset the local cursors so the
+      // next tick rebaselines.
+      //
+      // A backend that declares sync: "none" has no remote store
+      // to reconcile against; skip the pass entirely.
+      if (handle.sync !== "none") {
+        await reconcileWatermarks(this.#db, handle.rpc.sync, id);
+      }
+      this.#handles.set(id, handle);
+      // Watch the transport for mid-session loss. Backends without
+      // a `closed` promise (in-process fakes) opt out by omitting
+      // it; we only react when it's wired.
+      if (handle.closed) {
+        handle.closed
+          .catch(() => {})
+          .then(() => {
+            // Only clear if this handle is still the current one
+            // for this id. A close() that already ran will have
+            // dropped the entry; a subsequent #handleFor may have
+            // installed a new one.
+            if (this.#handles.get(id) === handle) {
+              this.#handles.delete(id);
+              this.#shells.delete(id);
+            }
+          });
+      }
+      return handle;
+    })().finally(() => {
+      // Always drop the in-flight entry so a failed connect can
+      // be retried by the next call.
+      this.#connecting.delete(id);
+    });
+    this.#connecting.set(id, promise);
+    return promise;
+  }
+
+  // Per-backend WorkspaceShell, constructed on demand and cached
+  // for the life of the handle.
+  async #shellFor(id: string): Promise<WorkspaceShell> {
+    const cached = this.#shells.get(id);
+    if (cached !== undefined) return cached;
+    const handle = await this.#handleFor(id);
+    const existing = this.#shells.get(id);
+    if (existing !== undefined) return existing;
+    const shell = new WorkspaceShell(
+      handle.rpc.shell,
+      {
+        push: () => this.push(id),
+        pull: () => this.pull(id),
+      },
+      this.#observer,
+    );
+    this.#shells.set(id, shell);
+    return shell;
+  }
+
+  // Routed shell facade. Each method picks the right backend per
+  // call (default, or the one named through ExecOptions.backend)
+  // and forwards to that backend's WorkspaceShell.
+  #routedShell(): WorkspaceShell {
+    const router = new WorkspaceShellRouter(
+      this.#defaultBackendId ?? "",
+      (id) => this.#shellFor(id),
+      (id) => this.#resolveBackendId(id) ?? "",
+    );
+    return router as unknown as WorkspaceShell;
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, ms));
+// Selector wrapper that satisfies the WorkspaceShell surface but
+// resolves the underlying ShellRPC per call. ExecOptions and
+// GetExecOptions both gain an optional `backend` field; when
+// present the router routes the call to that backend's
+// WorkspaceShell, otherwise it routes to the default.
+//
+// Implemented as a non-extending class with the same method
+// names so the routed object slots into every callsite that
+// expects a WorkspaceShell without having to thread the union
+// type through.
+class WorkspaceShellRouter {
+  readonly #defaultId: string;
+  readonly #shellFor: (id: string) => Promise<WorkspaceShell>;
+  readonly #resolveId: (id: string | undefined) => string;
+
+  constructor(
+    defaultId: string,
+    shellFor: (id: string) => Promise<WorkspaceShell>,
+    resolveId: (id: string | undefined) => string,
+  ) {
+    this.#defaultId = defaultId;
+    this.#shellFor = shellFor;
+    this.#resolveId = resolveId;
+  }
+
+  async exec(command: string, options: { backend?: string } & Record<string, unknown> = {}) {
+    const id = this.#resolveId(options.backend) || this.#defaultId;
+    const shell = await this.#shellFor(id);
+    const { backend: _backend, ...rest } = options;
+    return (shell.exec as unknown as (c: string, o: typeof rest) => unknown)(command, rest);
+  }
+
+  async get(id: string, options: { backend?: string } & Record<string, unknown> = {}) {
+    const backendId = this.#resolveId(options.backend) || this.#defaultId;
+    const shell = await this.#shellFor(backendId);
+    const { backend: _backend, ...rest } = options;
+    return (shell.get as unknown as (e: string, o: typeof rest) => unknown)(id, rest);
+  }
 }

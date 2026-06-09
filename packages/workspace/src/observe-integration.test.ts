@@ -91,6 +91,7 @@ function composite(sync: SyncRPC): WorkspaceRPC {
 function backend(id: string, sync?: SyncRPC): WorkspaceBackend {
   return {
     id,
+    type: "fake",
     async connect(): Promise<BackendHandle> {
       return { rpc: composite(sync ?? fakeSync()), close: async () => {} };
     },
@@ -100,40 +101,53 @@ function backend(id: string, sync?: SyncRPC): WorkspaceBackend {
 function failingBackend(id: string, reason: string): WorkspaceBackend {
   return {
     id,
+    type: "fake",
     connect: () => Promise.reject(new Error(reason)),
   };
 }
 
 describe("Workspace observer — connection", () => {
-  it("opens one workspace.connect span per backend attempt and tags the backend id", async () => {
+  it("opens one workspace.connect span per backend dial and tags the backend id", async () => {
+    // Backends connect lazily on first use; ready(id) is the
+    // documented way to pre-warm one. The span fires once per
+    // dial, tagged with the backend id and type.
     const observer = makeRecorder();
     const ws = new Workspace({
       storage: makeStorage(),
       backends: [backend("primary")],
       observer,
     });
-    await ws.ready();
+    await ws.ready("primary");
     const connectSpans = observer.spans.filter((s) => s.name === "workspace.connect");
     expect(connectSpans).toHaveLength(1);
     expect(connectSpans[0].attributes["workspace.backend.id"]).toBe("primary");
+    expect(connectSpans[0].attributes["workspace.backend.type"]).toBe("fake");
     expect(connectSpans[0].outcome).toBe("ok");
   });
 
-  it("records each failed backend attempt as a failed span", async () => {
+  it("records a failed backend dial as a failed span", async () => {
+    // Per-backend addressing means a failure surfaces against the
+    // named id rather than walking a fallback chain. The span on
+    // the failed dial carries the error message.
     const observer = makeRecorder();
     const ws = new Workspace({
       storage: makeStorage(),
       backends: [failingBackend("first", "no thanks"), backend("second")],
       observer,
     });
-    await ws.ready();
-    const connectSpans = observer.spans.filter((s) => s.name === "workspace.connect");
-    expect(connectSpans).toHaveLength(2);
-    expect(connectSpans[0].attributes["workspace.backend.id"]).toBe("first");
-    expect(connectSpans[0].outcome).toBe("error");
-    expect(connectSpans[0].attributes["error.message"]).toBe("no thanks");
-    expect(connectSpans[1].attributes["workspace.backend.id"]).toBe("second");
-    expect(connectSpans[1].outcome).toBe("ok");
+    await expect(ws.ready("first")).rejects.toThrow(/no thanks/);
+    const failed = observer.spans.filter((s) => s.name === "workspace.connect");
+    expect(failed).toHaveLength(1);
+    expect(failed[0].attributes["workspace.backend.id"]).toBe("first");
+    expect(failed[0].outcome).toBe("error");
+    expect(failed[0].attributes["error.message"]).toBe("no thanks");
+    // Dialing the second backend separately still works — a
+    // failed dial on `first` doesn't taint `second`.
+    await ws.ready("second");
+    const all = observer.spans.filter((s) => s.name === "workspace.connect");
+    expect(all).toHaveLength(2);
+    expect(all[1].attributes["workspace.backend.id"]).toBe("second");
+    expect(all[1].outcome).toBe("ok");
   });
 });
 

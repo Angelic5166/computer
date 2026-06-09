@@ -19,6 +19,14 @@
       "types": "./dist/git.d.ts",
       "import": "./dist/git.js"
     },
+    "./backends/container": {
+      "types": "./dist/backends/container/index.d.ts",
+      "import": "./dist/backends/container/index.js"
+    },
+    "./backends/worker": {
+      "types": "./dist/backends/worker/index.d.ts",
+      "import": "./dist/backends/worker/index.js"
+    },
     "./observe/cloudflare": {
       "types": "./dist/observe/cloudflare.d.ts",
       "import": "./dist/observe/cloudflare.js"
@@ -31,6 +39,11 @@
     "README.md"
   ],
   "scripts": {
+    "build:shell-bundle": "node ./src/backends/worker/script/build-bundle.mjs",
+    "prebuild": "npm run build:shell-bundle",
+    "pretest": "npm run build:shell-bundle",
+    "pretypecheck": "npm run build:shell-bundle",
+    "prepare": "npm run build:shell-bundle",
     "build": "rolldown -c",
     "typecheck": "tsc -p tsconfig.build.json --noEmit",
     "test": "vitest run && vitest run --config vitest.config.proxy.ts && vitest run --config vitest.config.stub-soak.ts",
@@ -40,7 +53,8 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "capnweb": "^0.8.0"
+    "capnweb": "^0.8.0",
+    "just-bash": "^3.0.1"
   },
   "peerDependencies": {
     "@platformatic/vfs": "*",
@@ -65,6 +79,7 @@
     "@cloudflare/workspace-rpc": "*",
     "@platformatic/vfs": "^0.4.0",
     "diff": "^9.0.0",
+    "esbuild": "^0.28.0",
     "isomorphic-git": "^1.38.3",
     "memfs": "^4.57.6",
     "rolldown": "^1.0.2",

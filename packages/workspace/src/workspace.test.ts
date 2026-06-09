@@ -122,91 +122,206 @@ function makeBackend(
 ): WorkspaceBackend {
   return {
     id,
+    type: "fake",
     async connect(): Promise<BackendHandle> {
       return { rpc: composite(rpc ?? fakeRpc()), close: async () => {} };
     },
   };
 }
 
-function failingBackend(id: string, reason: string): WorkspaceBackend {
+// Backend with a wired shell.exec that pings a counter on every
+// call. exec resolves immediately with an empty event stream so
+// the WorkspaceShell exec bracket settles right away. Used by the
+// multi-backend selection tests.
+function execBackend(id: string, onExec: (command: string) => void): WorkspaceBackend {
+  const shell: import("@cloudflare/workspace-rpc").ShellRPC = {
+    async exec(input) {
+      onExec(input.command);
+      const execId = input.id ?? `${id}-${Math.random().toString(36).slice(2)}`;
+      return {
+        id: execId,
+        events: new ReadableStream<import("@cloudflare/workspace-rpc").ExecEvent>({
+          start(c) {
+            c.enqueue({ id: execId, seq: 1, name: "exit", value: 0 });
+            c.close();
+          },
+        }),
+      };
+    },
+    getExec: () => Promise.reject(new Error("not used")),
+    killExec: () => Promise.reject(new Error("not used")),
+    disposeExec: () => Promise.reject(new Error("not used")),
+  };
   return {
     id,
-    connect: () => Promise.reject(new Error(reason)),
+    type: "fake",
+    async connect(): Promise<BackendHandle> {
+      return {
+        rpc: { sync: fakeRpc(), shell },
+        sync: "none",
+        close: async () => {},
+      };
+    },
   };
 }
 
-describe("Workspace backend fallback", () => {
-  it("uses the first backend that connects", async () => {
-    const second = makeBackend("second");
+// Drain an ExecHandle (or its result()-aware wrapper) to settle
+// the WorkspaceShell push/pull bracket. The selection tests don't
+// care about the values — only that exec ran on the right backend.
+async function drainExec(handle: { result(): Promise<unknown> }): Promise<void> {
+  await handle.result();
+}
+
+describe("Workspace backend selection", () => {
+  it("picks the first backend in the list as the default", async () => {
+    // Two backends; only the first has its shell.exec wired. With
+    // no explicit id on the call, exec should land on the first.
+    let aExecs = 0;
+    let bExecs = 0;
+    const a = execBackend("a", () => {
+      aExecs += 1;
+    });
+    const b = execBackend("b", () => {
+      bExecs += 1;
+    });
+    const ws = new Workspace({ storage: makeStorage(), backends: [a, b] });
+    await ws.ready();
+    const handle = await ws.shell.exec("true");
+    await drainExec(handle);
+    expect(aExecs).toBe(1);
+    expect(bExecs).toBe(0);
+  });
+
+  it("routes exec to the backend named in ExecOptions.backend", async () => {
+    let aExecs = 0;
+    let bExecs = 0;
+    const a = execBackend("a", () => {
+      aExecs += 1;
+    });
+    const b = execBackend("b", () => {
+      bExecs += 1;
+    });
+    const ws = new Workspace({ storage: makeStorage(), backends: [a, b] });
+    await ws.ready();
+    await drainExec(await ws.shell.exec("true", { backend: "b" }));
+    expect(aExecs).toBe(0);
+    expect(bExecs).toBe(1);
+  });
+
+  it("throws on an unknown backend id", async () => {
     const ws = new Workspace({
       storage: makeStorage(),
-      backends: [failingBackend("first", "no thanks"), second],
+      backends: [execBackend("only", () => {})],
     });
     await ws.ready();
-    expect(ws.fs).toBeDefined();
+    await expect(ws.shell.exec("true", { backend: "missing" })).rejects.toThrow(
+      /no backend with id/,
+    );
   });
 
-  it("throws when every backend fails, surfacing each cause", async () => {
-    const ws = new Workspace({
-      storage: makeStorage(),
-      backends: [failingBackend("a", "boom"), failingBackend("b", "kaboom")],
-    });
-    await expect(ws.ready()).rejects.toThrow(/boom[\s\S]*kaboom/);
-  });
-
-  it("does not cache a failed ready() attempt", async () => {
+  it("does not cache a failed connect() attempt", async () => {
+    // A first-call failure on a named backend must leave the
+    // workspace able to retry. The lazy-connect path drops the
+    // in-flight entry in finally(), so the next call enters
+    // connect() against a fresh attempt.
     let attempts = 0;
     const backend: WorkspaceBackend = {
       id: "flaky",
+      type: "fake",
       async connect() {
         attempts++;
         if (attempts === 1) throw new Error("temporary container disconnect");
-        return {
-          rpc: composite(fakeRpc()),
-          close: async () => {},
-        };
+        return { rpc: composite(fakeRpc()), close: async () => {} };
       },
     };
     const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
-
-    await expect(ws.ready()).rejects.toThrow(/temporary container disconnect/);
-    await ws.ready();
-
+    await expect(ws.ready("flaky")).rejects.toThrow(/temporary container disconnect/);
+    await ws.ready("flaky");
     expect(attempts).toBe(2);
-    expect(ws.shell).toBeDefined();
   });
 
-  it("ready() is idempotent — subsequent calls reuse the same connection", async () => {
-    const backend = makeBackend("only");
-    const spy = vi.spyOn(backend, "connect");
-    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
-    await ws.ready();
-    await ws.ready();
-    expect(spy).toHaveBeenCalledTimes(1);
-  });
-
-  it("close() releases the backend handle", async () => {
-    let closed = 0;
-    const backend: WorkspaceBackend = {
-      id: "only",
+  it("close() releases every cached handle in parallel", async () => {
+    let closedA = 0;
+    let closedB = 0;
+    const a: WorkspaceBackend = {
+      id: "a",
+      type: "fake",
       async connect() {
         return {
           rpc: composite(fakeRpc()),
           close: async () => {
-            closed++;
+            closedA++;
           },
         };
       },
     };
-    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
-    await ws.ready();
+    const b: WorkspaceBackend = {
+      id: "b",
+      type: "fake",
+      async connect() {
+        return {
+          rpc: composite(fakeRpc()),
+          close: async () => {
+            closedB++;
+          },
+        };
+      },
+    };
+    const ws = new Workspace({ storage: makeStorage(), backends: [a, b] });
+    await ws.ready("a");
+    await ws.ready("b");
     await ws.close();
-    expect(closed).toBe(1);
+    expect(closedA).toBe(1);
+    expect(closedB).toBe(1);
   });
 
-  it("shell accessor throws before ready()", () => {
-    const ws = new Workspace({ storage: makeStorage(), backends: [makeBackend("only")] });
-    expect(() => ws.shell).toThrow(/not connected/);
+  it("backends connect lazily on first use — ready() alone doesn't dial", async () => {
+    const backend = makeBackend("only");
+    const spy = vi.spyOn(backend, "connect");
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+    await ws.ready();
+    expect(spy).not.toHaveBeenCalled();
+    // First exec triggers the connect.
+    const execBackendVar = execBackend("only", () => {});
+    const ws2 = new Workspace({
+      storage: makeStorage(),
+      backends: [execBackendVar],
+    });
+    const connectSpy = vi.spyOn(execBackendVar, "connect");
+    await ws2.ready();
+    expect(connectSpy).not.toHaveBeenCalled();
+    await drainExec(await ws2.shell.exec("true"));
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+    // Second exec reuses the cached handle.
+    await drainExec(await ws2.shell.exec("true"));
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("ready(id) eagerly connects the named backend", async () => {
+    const backend = execBackend("only", () => {});
+    const spy = vi.spyOn(backend, "connect");
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+    await ws.ready("only");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("ready({ all: true }) connects every backend in parallel", async () => {
+    const a = execBackend("a", () => {});
+    const b = execBackend("b", () => {});
+    const spyA = vi.spyOn(a, "connect");
+    const spyB = vi.spyOn(b, "connect");
+    const ws = new Workspace({ storage: makeStorage(), backends: [a, b] });
+    await ws.ready({ all: true });
+    expect(spyA).toHaveBeenCalledTimes(1);
+    expect(spyB).toHaveBeenCalledTimes(1);
+  });
+
+  it("shell accessor returns a router even before any connect", () => {
+    const ws = new Workspace({
+      storage: makeStorage(),
+      backends: [execBackend("only", () => {})],
+    });
+    expect(ws.shell).toBeDefined();
   });
 
   it("fs accessor is available immediately — no ready() needed", () => {
@@ -214,21 +329,83 @@ describe("Workspace backend fallback", () => {
     expect(ws.fs).toBeDefined();
   });
 
-  it("requires at least one backend", () => {
-    expect(() => new Workspace({ storage: makeStorage(), backends: [] })).toThrow(
-      /at least one backend/,
-    );
+  it("rejects duplicate backend ids at construction", () => {
+    expect(
+      () =>
+        new Workspace({
+          storage: makeStorage(),
+          backends: [makeBackend("a"), makeBackend("a")],
+        }),
+    ).toThrow(/duplicate backend id/);
+  });
+
+  describe("without a backend", () => {
+    // A Workspace constructed without backends gives callers the
+    // local SQLite-backed filesystem on its own. The shell half
+    // throws a clear error if anyone reaches it, so the caller is
+    // not silently handed a half-working surface.
+    it("constructs and exposes fs without ready() throwing", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      await ws.ready();
+      await ws.fs.writeFile("/a.txt", "hi");
+      expect(await ws.fs.readFile("/a.txt", "utf8")).toBe("hi");
+    });
+
+    it("throws a clear error when shell is reached", () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      expect(() => ws.shell).toThrow(/no backend/);
+    });
+
+    it("push and pull short-circuit to zero / empty", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      await ws.ready();
+      await ws.fs.writeFile("/a.txt", "hi");
+      expect(await ws.push()).toBe(0);
+      const pulled = await ws.pull();
+      expect(pulled).toEqual({ applied: 0, skipped: [] });
+    });
+
+    it("stub() works and fs methods round-trip through it", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      await ws.ready();
+      const stub = ws.stub();
+      await stub.fs.writeFile("/b.txt", "hello");
+      expect(await stub.fs.readFile("/b.txt", "utf8")).toBe("hello");
+    });
+
+    it("stub().shell.exec throws the same no-backend error", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      await ws.ready();
+      const stub = ws.stub();
+      // The stub's exec kicks off the underlying call eagerly
+      // and returns a handle whose result() awaits the pending
+      // promise. With no backend configured the inner promise
+      // rejects; await result() to surface it.
+      const handle = await stub.shell.exec("true");
+      await expect(handle.result()).rejects.toThrow(/no backend/);
+    });
+
+    it("close() is a no-op with no backend configured", async () => {
+      const ws = new Workspace({ storage: makeStorage() });
+      await ws.ready();
+      await ws.close();
+      // ready() again still works after close.
+      await ws.ready();
+      await ws.fs.writeFile("/c.txt", "again");
+      expect(await ws.fs.readFile("/c.txt", "utf8")).toBe("again");
+    });
   });
   it("drops the cached handle when the backend signals closed", async () => {
-    // The backend hands back a controllable `closed` promise; resolving it
-    // is how a real backend tells the Workspace "the transport is gone".
-    // After that, the next ready() must re-enter connect() rather than
-    // returning the dead handle.
+    // The backend hands back a controllable `closed` promise; resolving
+    // it is how a real backend tells the Workspace "the transport is
+    // gone". The cached entry for that backend id is removed; the next
+    // exec / push / pull re-enters connect() against a fresh transport.
     let signalClosed!: () => void;
     let closeCount = 0;
     let connectCount = 0;
     const backend: WorkspaceBackend = {
       id: "only",
+      type: "fake",
       async connect(): Promise<BackendHandle> {
         connectCount++;
         const closed = new Promise<void>((resolve) => {
@@ -244,33 +421,32 @@ describe("Workspace backend fallback", () => {
       },
     };
     const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
-    await ws.ready();
+    await ws.ready("only");
     expect(connectCount).toBe(1);
 
     // Simulate a mid-session WebSocket drop.
     signalClosed();
-    // Yield so the promise's then-callback inside Workspace runs.
     await new Promise((r) => setTimeout(r, 0));
 
-    // The drop should have torn the cached handle down. close() on
-    // the handle is idempotent and the Workspace must not call it
-    // again here — the transport is already gone.
+    // Workspace does not call close() itself when the backend's own
+    // closed promise fires — the transport is already gone.
     expect(closeCount).toBe(0);
 
-    // The next ready() rebuilds.
-    await ws.ready();
+    // The next ready(id) rebuilds.
+    await ws.ready("only");
     expect(connectCount).toBe(2);
   });
 
   it("push() rebuilds after the backend signals closed", async () => {
-    // After a transport drop the Workspace clears #handle, #shell,
-    // and #readyPromise. The next push() call must re-enter
-    // connect() through ready() and ship against the fresh handle
-    // rather than throwing "Workspace not connected".
+    // After a transport drop the Workspace removes the cached
+    // handle for that backend id. The next push() call must
+    // re-enter the lazy connect path and ship against the fresh
+    // handle rather than throwing.
     let signalClosed!: () => void;
     let connectCount = 0;
     const backend: WorkspaceBackend = {
       id: "reconnect",
+      type: "fake",
       async connect(): Promise<BackendHandle> {
         connectCount += 1;
         const closed =
@@ -287,7 +463,7 @@ describe("Workspace backend fallback", () => {
       },
     };
     const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
-    await ws.ready();
+    await ws.ready("reconnect");
     expect(connectCount).toBe(1);
 
     signalClosed();
@@ -299,13 +475,7 @@ describe("Workspace backend fallback", () => {
     expect(connectCount).toBe(2);
   });
 
-  it("reconciles watermarks on connect when the remote is behind", async () => {
-    // Seed local watermarks so they look like they have already
-    // shipped data to / pulled data from a previous container. The
-    // remote in this test is fresh — currentRev = 0, pushRev = 0 —
-    // mirroring the "container restarted with an empty in-memory VFS"
-    // case. ready() must observe the mismatch and reset both
-    // cursors so the next push/pull rebaselines.
+  it("reconciles watermarks on the lazy connect when the remote is behind", async () => {
     let watermarksCalls = 0;
     const sync: import("@cloudflare/workspace-rpc").SyncRPC = {
       ...fakeRpc(),
@@ -316,51 +486,68 @@ describe("Workspace backend fallback", () => {
     };
     const storage = makeStorage();
     const ws = new Workspace({ storage, backends: [makeBackend("only", sync)] });
-    // Pre-seed local watermarks.
     const { writeWatermark, readWatermark } = await import("@cloudflare/dofs");
-    writeWatermark(ws.db, "pushRev", 17);
-    writeWatermark(ws.db, "fetchRev", 42);
-    await ws.ready();
+    writeWatermark(ws.db, "pushRev", 17, "only");
+    writeWatermark(ws.db, "fetchRev", 42, "only");
+    // ready() alone no longer dials; ready(id) forces the connect.
+    await ws.ready("only");
     expect(watermarksCalls).toBe(1);
-    expect(readWatermark(ws.db, "pushRev")).toBe(0);
-    expect(readWatermark(ws.db, "fetchRev")).toBe(0);
+    expect(readWatermark(ws.db, "pushRev", "only")).toBe(0);
+    expect(readWatermark(ws.db, "fetchRev", "only")).toBe(0);
   });
 
-  it("retries connect() with bounded backoff when the option is set", async () => {
-    let attempts = 0;
+  it("skips push/pull when the backend declares sync: 'none'", async () => {
+    // A backend with no remote store (a worker-isolate shell
+    // talking back to the same Durable Object filesystem)
+    // declares sync: "none" on its BackendHandle. Workspace.push
+    // and Workspace.pull short-circuit and the reconcile pass on
+    // connect is skipped — nothing on the other end to reconcile
+    // against.
+    const touched: string[] = [];
+    const tripwire = (name: string): never => {
+      touched.push(name);
+      throw new Error(`sync.${name} must not be reached when sync: 'none'`);
+    };
+    const sync: import("@cloudflare/workspace-rpc").SyncRPC = {
+      push: () => tripwire("push"),
+      fetchChanges: () => tripwire("fetchChanges"),
+      readEntry: () => tripwire("readEntry"),
+      hasObjects: () => tripwire("hasObjects"),
+      fetchObjects: () => {
+        try {
+          tripwire("fetchObjects");
+        } catch (error) {
+          // tripwire above pushes onto `touched` before throwing,
+          // so the assertion still surfaces the wire touch.
+          return new ReadableStream({
+            start(c) {
+              c.error(error);
+            },
+          });
+        }
+        return new ReadableStream();
+      },
+      pushObjects: () => tripwire("pushObjects"),
+      watermarks: () => tripwire("watermarks"),
+    };
     const backend: WorkspaceBackend = {
-      id: "flaky",
+      id: "no-sync",
+      type: "fake",
       async connect(): Promise<BackendHandle> {
-        attempts++;
-        if (attempts < 3) throw new Error(`attempt ${attempts} failed`);
-        return { rpc: composite(fakeRpc()), close: async () => {} };
+        return { rpc: composite(sync), sync: "none", close: async () => {} };
       },
     };
-    const ws = new Workspace({
-      storage: makeStorage(),
-      backends: [backend],
-      reconnect: { attempts: 3, initialDelayMs: 1, maxDelayMs: 4 },
-    });
-    await ws.ready();
-    expect(attempts).toBe(3);
-  });
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+    await ws.ready("no-sync");
+    expect(touched).toEqual([]);
 
-  it("surfaces the final error after the retry budget is exhausted", async () => {
-    let attempts = 0;
-    const backend: WorkspaceBackend = {
-      id: "always-fails",
-      async connect(): Promise<BackendHandle> {
-        attempts++;
-        throw new Error(`attempt ${attempts}`);
-      },
-    };
-    const ws = new Workspace({
-      storage: makeStorage(),
-      backends: [backend],
-      reconnect: { attempts: 3, initialDelayMs: 1, maxDelayMs: 4 },
-    });
-    await expect(ws.ready()).rejects.toThrow(/attempt 3/);
-    expect(attempts).toBe(3);
+    await ws.fs.writeFile("/local.txt", "hello");
+    const pushed = await ws.push();
+    const pulled = await ws.pull();
+    expect(pushed).toBe(0);
+    expect(pulled.applied).toBe(0);
+    expect(pulled.skipped).toEqual([]);
+    expect(touched).toEqual([]);
   });
 });
 

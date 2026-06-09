@@ -67,6 +67,10 @@ export interface WorkspaceExecOptions {
   // TextDecoder so multi-byte boundaries survive. Default leaves
   // bytes as Uint8Array.
   encoding?: "utf8";
+  // Backend selector. Omit to use the default backend (the first
+  // one configured on the Workspace); pass the id of another
+  // configured backend to route this call there.
+  backend?: string;
 }
 
 export interface WorkspaceExecResult<E extends "utf8" | undefined = undefined> {
@@ -114,6 +118,18 @@ export class WorkspaceFilesystemStub extends RpcTarget {
   stat(path: string): Promise<WorkspaceStatResult> {
     return withSpan(this.#ws.observer, "workspace.fs.stat", { "workspace.fs.path": path }, () =>
       this.#ws.fs.stat(path),
+    );
+  }
+
+  lstat(path: string): Promise<WorkspaceStatResult> {
+    return withSpan(this.#ws.observer, "workspace.fs.lstat", { "workspace.fs.path": path }, () =>
+      this.#ws.fs.lstat(path),
+    );
+  }
+
+  readlink(path: string): Promise<string> {
+    return withSpan(this.#ws.observer, "workspace.fs.readlink", { "workspace.fs.path": path }, () =>
+      this.#ws.fs.readlink(path),
     );
   }
 
@@ -199,6 +215,24 @@ export class WorkspaceFilesystemStub extends RpcTarget {
         "workspace.fs.force": options.force,
       },
       () => this.#ws.fs.rm(path, options),
+    );
+  }
+
+  chmod(path: string, mode: number): Promise<void> {
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.chmod",
+      { "workspace.fs.path": path, "workspace.fs.mode": mode },
+      () => this.#ws.fs.chmod(path, mode),
+    );
+  }
+
+  symlink(target: string, path: string): Promise<void> {
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.symlink",
+      { "workspace.fs.path": path, "workspace.fs.target": target },
+      () => this.#ws.fs.symlink(target, path),
     );
   }
 }
@@ -288,13 +322,23 @@ export class WorkspaceShellStub extends RpcTarget {
     const pending: Promise<ExecResult<"utf8" | undefined>> = withSpan(
       this.#ws.observer,
       "workspace.shell.exec",
-      { "workspace.shell.cwd": options.cwd, "workspace.shell.encoding": options.encoding },
+      {
+        "workspace.shell.cwd": options.cwd,
+        "workspace.shell.encoding": options.encoding,
+        "workspace.shell.backend": options.backend,
+      },
       () =>
         options.encoding === "utf8"
           ? this.#ws.shell
-              .exec(command, { cwd: options.cwd, encoding: "utf8" })
+              .exec(command, {
+                cwd: options.cwd,
+                encoding: "utf8",
+                backend: options.backend,
+              })
               .then((handle) => handle.result())
-          : this.#ws.shell.exec(command, { cwd: options.cwd }).then((handle) => handle.result()),
+          : this.#ws.shell
+              .exec(command, { cwd: options.cwd, backend: options.backend })
+              .then((handle) => handle.result()),
       (span, outcome) => {
         if (!outcome.ok) return;
         span.setAttribute("workspace.shell.exit_code", outcome.value.exitCode);

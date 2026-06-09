@@ -27,3 +27,18 @@ export class WorkspaceProxy {
     throw new Error("WorkspaceProxy.fetch is only callable under workerd.");
   }
 }
+
+export interface WorkspaceServiceProxyProps {
+  binding: string;
+  id: string;
+}
+
+export class WorkspaceServiceProxy {
+  constructor() {
+    throw new Error(
+      "WorkspaceServiceProxy is only available under workerd. " +
+        "Re-export it from your Worker entrypoint and let the runtime " +
+        "construct it via ctx.exports.WorkspaceServiceProxy(...).",
+    );
+  }
+}

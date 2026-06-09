@@ -17,13 +17,19 @@ export interface TestBackendOptions {
   // schemes are normalised to ws(s) when constructing the
   // capnweb WebSocket session.
   url: string;
+  // Selector this backend is registered under in Workspace.
+  // Defaults to "test"; override when the workspace hosts
+  // more than one instance of the same backend kind.
+  id?: string;
 }
 
 export class TestBackend implements WorkspaceBackend {
-  readonly id = "test";
+  readonly type = "test";
+  readonly id: string;
   readonly #url: string;
 
   constructor(options: TestBackendOptions) {
+    this.id = options.id ?? "test";
     this.#url = options.url;
   }
 

@@ -86,3 +86,65 @@ export class WorkspaceProxy extends WorkerEntrypoint<unknown, WorkspaceProxyProp
     return new Response("not found", { status: 404 });
   }
 }
+
+// WorkspaceServiceProxy — a loopback WorkerEntrypoint that
+// exposes the host DO's getWorkspace() method as a callable
+// Fetcher binding. Wired into a Dynamic Worker's env by a
+// Worker Loader callback so the loaded Worker can reach the
+// host Workspace without being handed the DO namespace
+// directly.
+//
+// Why this wrapper exists: env values passed to the Worker
+// Loader go through structured clone, which a raw
+// DurableObjectNamespace doesn't survive. Service-binding-shape
+// Fetchers produced by ctx.exports.<EntrypointClass>(...) do
+// survive, because the runtime serializes them as binding
+// references rather than raw values.
+//
+// Usage:
+//
+//   // Worker entry: re-export so the runtime can wrap it.
+//   export { WorkspaceServiceProxy } from "@cloudflare/workspace";
+//
+//   // Inside the DO that owns the Workspace:
+//   const host = ctx.exports.WorkspaceServiceProxy({
+//     props: { binding: "ContainerExample", id: ctx.id.toString() },
+//   });
+//   env.LOADER.get(`shell:${ctx.id}`, () => ({
+//     env: { HOST: host },
+//     ...
+//   }));
+//
+//   // Inside the Dynamic Worker:
+//   const ws = await env.HOST.getWorkspace();
+//
+// The proxy resolves env[binding] at call time — the same lazy
+// lookup WorkspaceProxy does for the /ws upgrade path — so the
+// DO class doesn't need to live in @cloudflare/workspace. Any
+// DO that exposes a `getWorkspace(): WorkspaceStub` RPC method
+// works.
+export interface WorkspaceServiceProxyProps {
+  // Name of a DurableObjectNamespace binding in env. The proxy
+  // resolves env[binding] at request time.
+  binding: string;
+  // Stringified DurableObjectId — typically ctx.id.toString()
+  // from inside the owning DO's constructor.
+  id: string;
+}
+
+export class WorkspaceServiceProxy extends WorkerEntrypoint<unknown, WorkspaceServiceProxyProps> {
+  // Forward to the host DO's getWorkspace() method. The DO class
+  // is expected to expose this method; both the container
+  // and worker example DOs do.
+  async getWorkspace(): Promise<unknown> {
+    const { binding, id } = this.ctx.props;
+    const ns = (this.env as Record<string, unknown>)[binding] as
+      | DurableObjectNamespace<{ getWorkspace(): Promise<unknown> }>
+      | undefined;
+    if (!ns) {
+      throw new Error(`WorkspaceServiceProxy: env.${binding} is not a DurableObjectNamespace`);
+    }
+    const stub = ns.get(ns.idFromString(id));
+    return stub.getWorkspace();
+  }
+}

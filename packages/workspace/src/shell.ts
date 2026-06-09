@@ -101,6 +101,10 @@ export interface ExecOptions<E extends ExecEncoding = undefined> {
   // Omit to use the runner's default (typically 320_000). Pass 0
   // to disable the timeout for this call.
   timeoutMs?: number;
+  // Backend selector. Omit to use the default backend (the first
+  // one passed to the Workspace constructor); pass the id of
+  // another configured backend to route this call there.
+  backend?: string;
 }
 
 export interface GetExecOptions<E extends ExecEncoding = undefined> {
@@ -109,6 +113,9 @@ export interface GetExecOptions<E extends ExecEncoding = undefined> {
   // number resumes from that seq+1. Omit to receive every
   // event from the start of the run (replays the whole log).
   resume?: "tail" | "full" | number;
+  // Backend selector. Same shape as ExecOptions.backend; routes
+  // the get / reattach to the named backend.
+  backend?: string;
 }
 
 // Push/pull bracket plumbing. WorkspaceShell doesn't know about

@@ -11,31 +11,90 @@
 > intent, not as description of the code today.
 
 Durable Object-side facade for a Cloudflare Workspace. Pairs a local
-SQLite-backed VFS (via `@cloudflare/dofs`) with a sync connection to
-a `wsd` instance through a pluggable backend.
+SQLite-backed VFS (via `@cloudflare/dofs`) with a pluggable backend
+that decides where shell commands run.
 
-The public surface lives on three classes:
+Two backends ship today, each on its own sub-path so the large
+dependencies they carry can be tree-shaken when you only use one:
+
+- [`@cloudflare/workspace/backends/container`](./src/backends/container/) —
+  runs the shell inside a Cloudflare Container against a `wsd`
+  daemon. Full Linux userland, real binaries, real network. The
+  container owns its own SQLite-backed VFS and the package syncs
+  the two stores across a capnweb WebSocket.
+- [`@cloudflare/workspace/backends/worker`](./src/backends/worker/) —
+  runs the shell as [just-bash](https://github.com/vercel-labs/just-bash)
+  inside a Dynamic Worker minted through `env.LOADER`. Every
+  filesystem operation forwards back to the same Durable Object;
+  no second store, no sync round trip. See
+  [`docs/12_worker_backend.md`](../../docs/12_worker_backend.md) and
+  `examples/worker/`.
+
+A backend can declare `sync: "none"` on the handle it returns to
+opt out of the push/pull bracket entirely — the worker backend
+does this because its shell shares the host store directly. The
+bracket still runs around `shell.exec` so the surface stays
+uniform; the counts are just always zero.
+
+## Public surface
 
 - `Workspace` — the host-side facade. Owns the local store, the
   backend handle, and the push/pull bracket.
 - `WorkspaceStub` — what `workspace.stub()` returns, designed to
   cross the Workers-RPC boundary into another Worker or DO.
 - `WorkspaceShell` / `ExecHandle` — the command-execution half of
-  the API.
+  the API. Throws a clear error if the Workspace was constructed
+  without a backend.
 
-Typical DO-side usage:
+## Typical DO-side usage
+
+Container backend:
 
 ```ts
-import { Workspace, CloudflareContainerBackend } from "@cloudflare/workspace";
+import { Workspace, WorkspaceProxy } from "@cloudflare/workspace";
+import { CloudflareContainerBackend, withWorkspaceContainer }
+  from "@cloudflare/workspace/backends/container";
 import { DurableObject } from "cloudflare:workers";
 
-export class WsdContainer extends DurableObject<Env> {
+export { WorkspaceProxy };
+
+export class ContainerExample extends withWorkspaceContainer(class extends DurableObject<Env> {}) {
   #workspace = new Workspace({
     storage: this.ctx.storage,
     backends: [
       new CloudflareContainerBackend({
-        container: () => this.ctx.container!,
-        egress: this.ctx.exports.WsdEgress({ props: { id: this.ctx.id.toString() } }),
+        container: () => this,
+        workspace: { binding: "ContainerExample", id: this.ctx.id.toString() },
+      }),
+    ],
+  });
+
+  async getWorkspace(): Promise<WorkspaceStub> {
+    await this.#workspace.ready();
+    return this.#workspace.stub();
+  }
+
+  override fetch(req: Request) { return this.#workspace; /* see example */ }
+}
+```
+
+Worker backend:
+
+```ts
+import { Workspace, WorkspaceServiceProxy } from "@cloudflare/workspace";
+import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
+import { DurableObject } from "cloudflare:workers";
+
+export { WorkspaceServiceProxy };
+
+export class ContainerExample extends DurableObject<Env> {
+  #workspace = new Workspace({
+    storage: this.ctx.storage,
+    backends: [
+      new WorkerBackend({
+        loader: env.LOADER,
+        workspace: { binding: "ContainerExample", id: this.ctx.id.toString() },
+        ctx,
       }),
     ],
   });
@@ -47,13 +106,72 @@ export class WsdContainer extends DurableObject<Env> {
 }
 ```
 
-Worker-side consumption:
+Filesystem only — no backend, no shell:
+
+```ts
+const ws = new Workspace({ storage: ctx.storage });
+await ws.ready();
+await ws.fs.writeFile("/notes.md", "hello");
+const body = await ws.fs.readFile("/notes.md", "utf8");
+// ws.shell throws — there's no backend wired up.
+```
+
+## Multiple backends per workspace
+
+A Workspace can carry more than one backend. Each backend
+registers under a stable `id` (defaulting to the backend's
+diagnostic kind — `"worker"`, `"cloudflare-container"` — so
+single-backend setups stay terse). `shell.exec` picks the
+default (the first backend in the list) unless the caller
+names a backend through `ExecOptions.backend`. Per-backend
+sync cursors live in dofs's `_vfs_watermark` table keyed by
+the same id; a push or pull against one backend never disturbs
+the other's cursors.
+
+```ts
+const workspace = new Workspace({
+  storage: ctx.storage,
+  backends: [
+    new WorkerBackend({
+      id: "shell",
+      loader: env.LOADER,
+      workspace: { binding: "AgentDO", id: ctx.id.toString() },
+      ctx,
+    }),
+    new CloudflareContainerBackend({
+      id: "sandbox",
+      container: () => this,
+      workspace: { binding: "AgentDO", id: ctx.id.toString() },
+    }),
+  ],
+});
+
+// Default: the first backend in the list runs the command.
+const grep = await ws.shell.exec("grep -r TODO /workspace");
+
+// Explicit: route a heavy build to the container.
+const build = await ws.shell.exec("npm test", { backend: "sandbox" });
+```
+
+Backends connect lazily — the first `exec` (or `push` /
+`pull` / `ready(id)`) for an id dials it. `ready({ all: true })`
+pre-warms every configured backend in parallel; useful from an
+agent's `onStart`. `Workspace.push(id?)` and
+`Workspace.pull(id?)` target a single backend, defaulting to
+the first one.
+
+A workspace with two backends that both write into
+`/workspace` has no global ordering between them; see
+[`docs/05_shell_interface.md`](../../docs/05_shell_interface.md)
+for the caveat.
+
+## Worker-side consumption
 
 ```ts
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const id = env.WSD.idFromName("user-123");
-    using ws = await env.WSD.get(id).getWorkspace();
+    const id = env.ContainerExample.idFromName("user-123");
+    using ws = await env.ContainerExample.get(id).getWorkspace();
 
     await ws.fs.writeFile("/notes.md", "hello");
     using handle = await ws.shell.exec("ls /workspace");
@@ -126,7 +244,9 @@ observability cost when callers do not opt in.
 capnweb does not garbage-collect remote stubs. On the long-lived
 sessions this package depends on (Worker ↔ DO over Workers RPC,
 DO ↔ wsd over capnweb), undisposed stubs accumulate on the peer
-side until the session ends.
+side until the session ends. The worker backend uses Workers RPC
+over an isolate boundary rather than capnweb, but the disposal
+discipline is the same.
 
 The minimum a caller needs to know:
 

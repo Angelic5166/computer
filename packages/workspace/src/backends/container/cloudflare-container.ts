@@ -47,8 +47,8 @@
 import type { WorkspaceRPC } from "@cloudflare/workspace-rpc";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 
-import type { BackendHandle, WorkspaceBackend } from "../backend.js";
-import { startHeartbeat } from "../heartbeat.js";
+import type { BackendHandle, WorkspaceBackend } from "../../backend.js";
+import { startHeartbeat } from "../../heartbeat.js";
 import type { IWorkspaceContainerAPI, WorkspaceRef } from "./container-host.js";
 
 // What the backend's `container` factory returns: anything with
@@ -83,7 +83,7 @@ export interface CloudflareContainerBackendOptions {
   egressHost?: string;
 
   // TCP port wsd listens on inside the container. Default 8080,
-  // matching the Dockerfile shipped with examples/wsd-container.
+  // matching the Dockerfile shipped with examples/container.
   containerPort?: number;
 
   // Environment variables passed to container.start(). Merged onto
@@ -99,6 +99,12 @@ export interface CloudflareContainerBackendOptions {
   // than waiting for the next real RPC, and keep middlebox idle
   // timers warm. Default 20_000ms. Set 0 to disable.
   heartbeatIntervalMs?: number;
+
+  // Selector this backend is registered under in Workspace.
+  // Defaults to "cloudflare-container"; override when the
+  // workspace hosts more than one instance of the same backend
+  // kind (e.g. two containers pinned to different pool members).
+  id?: string;
 }
 
 const DEFAULT_EGRESS_HOST = "workspace.internal";
@@ -107,10 +113,11 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export class CloudflareContainerBackend implements WorkspaceBackend {
-  readonly id = "cloudflare-container";
+  readonly type = "cloudflare-container";
+  readonly id: string;
 
   readonly #options: Required<
-    Omit<CloudflareContainerBackendOptions, "container" | "workspace" | "containerEnv">
+    Omit<CloudflareContainerBackendOptions, "container" | "workspace" | "containerEnv" | "id">
   > &
     Pick<CloudflareContainerBackendOptions, "container" | "workspace" | "containerEnv">;
 
@@ -125,6 +132,7 @@ export class CloudflareContainerBackend implements WorkspaceBackend {
   #handle: BackendHandle | undefined;
 
   constructor(options: CloudflareContainerBackendOptions) {
+    this.id = options.id ?? "cloudflare-container";
     this.#options = {
       container: options.container,
       workspace: options.workspace,

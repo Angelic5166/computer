@@ -2,9 +2,18 @@
 //
 // The package runs inside a Cloudflare Worker / Durable
 // Object. It picks a backend, holds a SyncRPC connection to
-// wsd, and exposes a file-shaped facade. Backends are
-// pluggable; today TestBackend (point at a URL) and
-// CloudflareContainerBackend (Container DO binding) ship.
+// wsd, and exposes a file-shaped facade.
+//
+// Backends ship under sub-path entries so the large built
+// dependencies they carry (a bundled just-bash for the worker
+// backend, etc.) can be tree-shaken when a consumer only uses
+// one of them:
+//
+//   import { CloudflareContainerBackend } from "@cloudflare/workspace/backends/container";
+//   import { WorkerBackend }              from "@cloudflare/workspace/backends/worker";
+//
+// TestBackend stays on the main entry because it's a thin
+// test-only fake with no payload.
 
 export type {
   ApplyResult,
@@ -14,16 +23,6 @@ export type {
 } from "@cloudflare/dofs";
 export { SQLiteWorkspaceProvider } from "@cloudflare/dofs";
 export type { BackendHandle, WorkspaceBackend } from "./backend.js";
-export {
-  CloudflareContainerBackend,
-  type CloudflareContainerBackendOptions,
-} from "./backends/cloudflare-container.js";
-export {
-  type IWorkspaceContainerAPI,
-  WorkspaceContainerAPI,
-  type WorkspaceRef,
-  withWorkspaceContainer,
-} from "./backends/container-host.js";
 export { TestBackend, type TestBackendOptions } from "./backends/test.js";
 export { R2Bucket, type R2BucketBinding, type R2BucketOptions } from "./mounts/providers/r2.js";
 export type {
@@ -41,7 +40,12 @@ export {
   type WorkspaceObserver,
   type WorkspaceSpan,
 } from "./observe.js";
-export { WorkspaceProxy, type WorkspaceProxyProps } from "./proxy.js";
+export {
+  WorkspaceProxy,
+  type WorkspaceProxyProps,
+  WorkspaceServiceProxy,
+  type WorkspaceServiceProxyProps,
+} from "./proxy.js";
 export type {
   ExecEncoding,
   ExecHandle,
