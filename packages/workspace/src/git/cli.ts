@@ -20,7 +20,15 @@
 // Wiring it up in phase 1 keeps the type stable when phase 3
 // lands `commit`.
 
+import {
+  AlreadyInitializedError,
+  GitError,
+  MissingIdentityError,
+  NotARepositoryError,
+  PathspecNotFoundError,
+} from "./errors.js";
 import type { GitClient, GitIdentity } from "./index.js";
+import { formatPorcelainV2, formatShort } from "./status.js";
 
 export interface GitCliInput {
   /** Argv as seen by the shell command. `argv[0]` is the subcommand. */
@@ -82,6 +90,16 @@ export async function runGitCli(
       return await runClone(client, rest, input);
     case "diff":
       return await runDiff(client, rest, input);
+    case "init":
+      return await runInit(client, rest, input);
+    case "status":
+      return await runStatus(client, rest, input);
+    case "add":
+      return await runAdd(client, rest, input);
+    case "rm":
+      return await runRm(client, rest, input);
+    case "commit":
+      return await runCommit(client, rest, input, options);
     default:
       return {
         stdout: "",
@@ -100,10 +118,15 @@ function printHelp(): GitCliResult {
     "usage: git <command> [<args>]",
     "",
     "Supported workspace git commands:",
+    "   add      Stage paths into the index.",
     "   clone    Clone a remote repository into the workspace.",
-    "   diff    Show changes between HEAD and the working tree.",
-    "   help    Show this help.",
-    "   version    Print the workspace git wrapper version.",
+    "   commit   Write the current index to a new commit.",
+    "   diff     Show changes between HEAD and the working tree.",
+    "   init     Initialise a new repository.",
+    "   rm       Unstage paths from the index.",
+    "   status   Describe the working-tree / index / HEAD delta.",
+    "   help     Show this help.",
+    "   version  Print the workspace git wrapper version.",
     "",
   ];
   return { stdout: `${lines.join("\n")}`, stderr: "", exitCode: 0 };
@@ -245,11 +268,289 @@ async function runDiff(
 }
 
 // ---------------------------------------------------------------
+// init
+// ---------------------------------------------------------------
+
+async function runInit(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git init [--initial-branch=<name>] [--bare] [<dir>]`
+  const parsed = parseFlags(args, {
+    "initial-branch": { kind: "value", alias: ["b"] },
+    bare: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git init: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 1) {
+    return {
+      stdout: "",
+      stderr: `git init: unexpected argument '${parsed.positional[1]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(parsed.positional[0], input.cwd);
+  try {
+    await client.init({
+      dir,
+      defaultBranch: parsed.flags["initial-branch"] as string | undefined,
+      bare: parsed.flags.bare === true,
+    });
+  } catch (cause) {
+    return mapGitError("init", cause);
+  }
+  return {
+    stdout: `Initialized empty Git repository in ${dir}/.git/\n`,
+    stderr: "",
+    exitCode: 0,
+  };
+}
+
+// ---------------------------------------------------------------
+// status
+// ---------------------------------------------------------------
+
+async function runStatus(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git status [--porcelain[=v2]] [--short | -s]`
+  const parsed = parseFlags(args, {
+    porcelain: { kind: "value-or-bool" },
+    short: { kind: "bool", alias: ["s"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git status: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 0) {
+    return {
+      stdout: "",
+      stderr: `git status: unexpected argument '${parsed.positional[0]}'\n`,
+      exitCode: 129,
+    };
+  }
+  // Format selection. Default is porcelain v2 — the typed CLI
+  // surface is intentionally machine-readable; the long-form
+  // human output is deferred.
+  const porcelain = parsed.flags.porcelain;
+  const useShort = parsed.flags.short === true;
+  const v2 = porcelain === undefined || porcelain === true || porcelain === "v2";
+  if (porcelain !== undefined && porcelain !== true && porcelain !== "v2" && porcelain !== "1") {
+    return {
+      stdout: "",
+      stderr: `git status: unsupported --porcelain value '${porcelain}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  let entries: import("./status.js").StatusEntry[];
+  try {
+    entries = await client.status({ dir });
+  } catch (cause) {
+    return mapGitError("status", cause);
+  }
+  const stdout = useShort
+    ? formatShort(entries)
+    : v2
+      ? formatPorcelainV2(entries)
+      : formatShort(entries);
+  return { stdout, stderr: "", exitCode: 0 };
+}
+
+// ---------------------------------------------------------------
+// add
+// ---------------------------------------------------------------
+
+async function runAdd(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git add [--force] <pathspec>...`
+  const parsed = parseFlags(args, {
+    force: { kind: "bool", alias: ["f"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git add: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length === 0) {
+    return { stdout: "", stderr: "git add: nothing specified, nothing added.\n", exitCode: 129 };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    await client.add({ dir, paths: parsed.positional, force: parsed.flags.force === true });
+  } catch (cause) {
+    return mapGitError("add", cause);
+  }
+  return { stdout: "", stderr: "", exitCode: 0 };
+}
+
+// ---------------------------------------------------------------
+// rm
+// ---------------------------------------------------------------
+
+async function runRm(client: GitClient, args: string[], input: GitCliInput): Promise<GitCliResult> {
+  // `git rm <pathspec>...`. We don't surface --cached (yet); the
+  // typed surface lacks it and isomorphic-git's `remove` only
+  // unstages — it does not touch the working tree. Document this
+  // in the docs phase; warn here so a caller piping in --cached
+  // isn't surprised.
+  const parsed = parseFlags(args, {
+    cached: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git rm: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length === 0) {
+    return {
+      stdout: "",
+      stderr: "git rm: no pathspec given on command line\n",
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    await client.rm({ dir, paths: parsed.positional });
+  } catch (cause) {
+    return mapGitError("rm", cause);
+  }
+  return { stdout: "", stderr: "", exitCode: 0 };
+}
+
+// ---------------------------------------------------------------
+// commit
+// ---------------------------------------------------------------
+
+async function runCommit(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+  _options: RunGitCliOptions,
+): Promise<GitCliResult> {
+  // `git commit -m <msg> [--amend] [--author="Name <email>"]`
+  const parsed = parseFlags(args, {
+    message: { kind: "value", alias: ["m"] },
+    amend: { kind: "bool" },
+    author: { kind: "value" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git commit: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 0) {
+    return {
+      stdout: "",
+      stderr: `git commit: unexpected argument '${parsed.positional[0]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const message = parsed.flags.message as string | undefined;
+  if (!message) {
+    return {
+      stdout: "",
+      stderr: "git commit: -m <message> is required\n",
+      exitCode: 129,
+    };
+  }
+  let author: { name: string; email: string } | undefined;
+  if (parsed.flags.author !== undefined) {
+    author = parseAuthorString(parsed.flags.author as string);
+    if (!author) {
+      return {
+        stdout: "",
+        stderr: `git commit: malformed --author '${parsed.flags.author}'. Expected 'Name <email>'.\n`,
+        exitCode: 129,
+      };
+    }
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  // Identity resolution happens inside commitWith via the typed
+  // surface; mirror the same env shape here.
+  try {
+    const { oid } = await client.commit({
+      dir,
+      message,
+      author,
+      amend: parsed.flags.amend === true,
+      env: input.env,
+    });
+    // Real git prints a richer summary; the short form keeps
+    // automation simple.
+    return {
+      stdout: `[${oid.slice(0, 7)}] ${firstLine(message)}\n`,
+      stderr: "",
+      exitCode: 0,
+    };
+  } catch (cause) {
+    return mapGitError("commit", cause);
+  }
+}
+
+function parseAuthorString(s: string): { name: string; email: string } | undefined {
+  // `Name <email@host>` — the same shape `git -c user.email=...`
+  // and `--author` accept. Anything else is rejected; the CLI
+  // shouldn't silently drop the email half.
+  const m = /^(.+?)\s*<([^<>]+)>\s*$/.exec(s);
+  if (!m) return undefined;
+  return { name: m[1].trim(), email: m[2].trim() };
+}
+
+function firstLine(s: string): string {
+  const i = s.indexOf("\n");
+  return i === -1 ? s : s.slice(0, i);
+}
+
+// ---------------------------------------------------------------
+// shared error mapping
+// ---------------------------------------------------------------
+
+/**
+ * Map a `GitError` subclass to the standard `git: <message>`
+ * stderr framing and a deterministic exit code:
+ *
+ *   NotARepositoryError, AlreadyInitializedError,
+ *   MissingIdentityError, PathOutsideRepoError,
+ *   PathspecNotFoundError -> 128
+ *   any other GitError                                  -> 1
+ *   non-Error                                          -> 1
+ *
+ * Matches real git's convention of using 128 for environmental
+ * errors and 1 for "command ran but didn't succeed".
+ */
+function mapGitError(subcommand: string, cause: unknown): GitCliResult {
+  if (cause instanceof NotARepositoryError) {
+    return makeStderr(subcommand, cause.message, 128);
+  }
+  if (cause instanceof AlreadyInitializedError) {
+    return makeStderr(subcommand, cause.message, 128);
+  }
+  if (cause instanceof MissingIdentityError) {
+    return makeStderr(subcommand, cause.message, 128);
+  }
+  if (cause instanceof PathspecNotFoundError) {
+    return makeStderr(subcommand, cause.message, 128);
+  }
+  if (cause instanceof GitError) {
+    return makeStderr(subcommand, cause.message, 1);
+  }
+  return makeStderr(subcommand, errorMessage(cause), 1);
+}
+
+function makeStderr(subcommand: string, message: string, exitCode: number): GitCliResult {
+  return { stdout: "", stderr: `git ${subcommand}: ${message}\n`, exitCode };
+}
+
+// ---------------------------------------------------------------
 // argv parser
 // ---------------------------------------------------------------
 
 interface FlagSpec {
-  kind: "bool" | "value";
+  // `bool`: presence sets `true`; `--flag=x` is an error.
+  // `value`: requires a value, inline (`--flag=x`) or next argv (`--flag x`).
+  // `value-or-bool`: bare `--flag` sets `true`; `--flag=x` sets the value.
+  kind: "bool" | "value" | "value-or-bool";
   alias?: string[];
 }
 
@@ -299,6 +600,14 @@ function parseFlags(args: string[], spec: Record<string, FlagSpec>): ParseResult
         i++;
         continue;
       }
+      if (s.kind === "value-or-bool") {
+        // Bare `--flag` -> true; `--flag=x` -> x. The bare form
+        // never consumes the next argv (it would be ambiguous
+        // against a positional).
+        flags[name] = inlineValue ?? true;
+        i++;
+        continue;
+      }
       if (inlineValue !== undefined) {
         flags[name] = inlineValue;
         i++;
@@ -317,7 +626,7 @@ function parseFlags(args: string[], spec: Record<string, FlagSpec>): ParseResult
       const name = aliasMap.get(short);
       if (!name) return { error: `unknown option '-${short}'` };
       const s = spec[name];
-      if (s.kind === "bool") {
+      if (s.kind === "bool" || s.kind === "value-or-bool") {
         flags[name] = true;
         i++;
         continue;

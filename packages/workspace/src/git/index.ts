@@ -26,16 +26,49 @@ import { type IsomorphicGitFSClient, workspaceIsomorphicGitClient } from "./adap
 import { type GitCliInput, type GitCliResult, runGitCli } from "./cli.js";
 import { cloneWith, type GitCloneOptions, type IsomorphicGitClient } from "./clone.js";
 import {
+  type CommitResult,
+  commitWith,
+  type GitCommitOptions,
+  type IsomorphicGitCommitClient,
+} from "./commit.js";
+import {
   type CreatePatchFn,
   diffWith,
   type GitDiffOptions,
   type IsomorphicGitDiffClient,
   type ReadFileFn,
 } from "./diff.js";
+import { type GitInitOptions, type IsomorphicGitInitClient, initWith } from "./init.js";
+import {
+  addWith,
+  type GitAddOptions,
+  type GitRmOptions,
+  type IsomorphicGitAddClient,
+  type IsomorphicGitRmClient,
+  rmWith,
+} from "./staging.js";
+import {
+  type GitStatusOptions,
+  type IsomorphicGitStatusClient,
+  type StatusEntry,
+  statusWith,
+} from "./status.js";
 
 export type { GitCliInput, GitCliResult } from "./cli.js";
 export type { GitCloneOptions, MessageCallback, ProgressCallback } from "./clone.js";
+export type { CommitResult, GitCommitOptions } from "./commit.js";
 export type { GitDiffOptions, StatusRow } from "./diff.js";
+export {
+  AlreadyInitializedError,
+  GitError,
+  MissingIdentityError,
+  NotARepositoryError,
+  PathOutsideRepoError,
+  PathspecNotFoundError,
+} from "./errors.js";
+export type { GitInitOptions } from "./init.js";
+export type { GitAddOptions, GitRmOptions } from "./staging.js";
+export type { GitStatusOptions, StatusEntry } from "./status.js";
 
 /** Duck-typed workspace handle. Only `.provider()` is required. */
 export interface WorkspaceLike {
@@ -59,12 +92,20 @@ export interface GitClient {
   clone(options: GitCloneOptions): Promise<void>;
   /** Unified diff between a ref (default HEAD) and the working tree. */
   diff(options?: GitDiffOptions): Promise<string>;
+  /** Initialise a new repository in the bound workspace. */
+  init(options?: GitInitOptions): Promise<void>;
+  /** Describe the working-tree / index / HEAD delta. */
+  status(options?: GitStatusOptions): Promise<StatusEntry[]>;
+  /** Stage paths into the index. */
+  add(options: GitAddOptions): Promise<void>;
+  /** Unstage paths from the index. */
+  rm(options: GitRmOptions): Promise<void>;
+  /** Write the current index to a new commit on HEAD. */
+  commit(options: GitCommitOptions): Promise<CommitResult>;
   /**
    * Argv-driven entry point. The worker-backend's `git` custom
    * command dispatches through this; in-process callers can use
-   * it too when they want CLI-shaped output. The supported
-   * subcommands today mirror the typed surface (`clone`, `diff`)
-   * plus the trivial `help` and `version`.
+   * it too when they want CLI-shaped output.
    */
   cli(input: GitCliInput): Promise<GitCliResult>;
 }
@@ -158,6 +199,46 @@ export function createGitClient({
         createPatch: await loadDiffPatch(),
         readFile: readFileFrom(f),
         cache,
+      });
+    },
+    async init(options = {}) {
+      await initWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitInitClient>(),
+      });
+    },
+    async status(options = {}) {
+      return statusWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitStatusClient>(),
+        cache,
+      });
+    },
+    async add(options) {
+      await addWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitAddClient>(),
+        cache,
+      });
+    },
+    async rm(options) {
+      await rmWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRmClient>(),
+        cache,
+      });
+    },
+    async commit(options) {
+      return commitWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitCommitClient>(),
+        cache,
+        defaultIdentity,
       });
     },
     async cli(input) {
