@@ -93,9 +93,13 @@ const PULL_BATCH_SIZE = 256;
 // require the wire to carry a rev cursor per entry. Crash safety is
 // idempotent re-apply: the receiver's alreadyApplied() check inside
 // applyChanges drops a re-fetched batch on the floor.
-export async function pullOnce(db: Database, remote: SyncRPC): Promise<ApplyResult> {
-  const sinceRev = readWatermark(db, "fetchRev");
-  const localPushRev = readWatermark(db, "pushRev");
+export async function pullOnce(
+  db: Database,
+  remote: SyncRPC,
+  backend?: string,
+): Promise<ApplyResult> {
+  const sinceRev = readWatermark(db, "fetchRev", backend);
+  const localPushRev = readWatermark(db, "pushRev", backend);
   // fetchChanges hands back the remote's currentRev (cursor we
   // advance fetchRev to), its appliedPushRev (cross-side invariant
   // check on the pull path), and the entry stream itself. One
@@ -195,6 +199,7 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<ApplyResu
       const batchResult = await applyChanges(db, batch, new Map(), {
         source: "upstream",
         advanceFetchRev: batchMaxRev,
+        backend,
       });
       totalApplied += batchResult.applied;
       if (batchResult.skipped.length > 0) {
@@ -212,9 +217,9 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<ApplyResu
   // and the per-batch path never fires. Advancing to remoteRev here
   // is still safe because we captured it before draining the stream
   // and never regress.
-  const current = readWatermark(db, "fetchRev");
+  const current = readWatermark(db, "fetchRev", backend);
   if (remoteRev > current) {
-    writeWatermark(db, "fetchRev", remoteRev);
+    writeWatermark(db, "fetchRev", remoteRev, backend);
   }
   return { applied: totalApplied, skipped: totalSkipped };
 }
@@ -222,8 +227,8 @@ export async function pullOnce(db: Database, remote: SyncRPC): Promise<ApplyResu
 // Push every entry the local store has produced since the last
 // successful push. The wire shape mirrors pullOnce in reverse:
 // stage bytes the remote lacks, then push the entry stream.
-export async function pushOnce(db: Database, remote: SyncRPC): Promise<number> {
-  const sincePush = readWatermark(db, "pushRev");
+export async function pushOnce(db: Database, remote: SyncRPC, backend?: string): Promise<number> {
+  const sincePush = readWatermark(db, "pushRev", backend);
   const localRev = currentRev(db);
   if (localRev <= sincePush) return 0;
 
@@ -292,7 +297,7 @@ export async function pushOnce(db: Database, remote: SyncRPC): Promise<number> {
 
   // Local pushRev advances to the rev we observed at the start of
   // this round. Anything written after that gets caught next tick.
-  writeWatermark(db, "pushRev", localRev);
+  writeWatermark(db, "pushRev", localRev, backend);
   return entries.length;
 }
 
@@ -329,10 +334,11 @@ export async function tick(
 export async function reconcileWatermarks(
   db: Database,
   remote: SyncRPC,
+  backend?: string,
 ): Promise<{ fetchRevReset: boolean; pushRevReset: boolean }> {
   const remoteWatermarks = await remote.watermarks();
-  const localFetchRev = readWatermark(db, "fetchRev");
-  const localPushRev = readWatermark(db, "pushRev");
+  const localFetchRev = readWatermark(db, "fetchRev", backend);
+  const localPushRev = readWatermark(db, "pushRev", backend);
 
   let fetchRevReset = false;
   let pushRevReset = false;
@@ -341,7 +347,7 @@ export async function reconcileWatermarks(
   // log is shorter than we remember — it lost state since we last
   // pulled. Re-baseline from 0.
   if (remoteWatermarks.currentRev < localFetchRev) {
-    writeWatermark(db, "fetchRev", 0);
+    writeWatermark(db, "fetchRev", 0, backend);
     fetchRevReset = true;
   }
 
@@ -350,7 +356,7 @@ export async function reconcileWatermarks(
   // on every push). If that's below our local pushRev, the remote
   // hasn't seen what we claimed to ship — reset and re-push.
   if (remoteWatermarks.pushRev < localPushRev) {
-    writeWatermark(db, "pushRev", 0);
+    writeWatermark(db, "pushRev", 0, backend);
     pushRevReset = true;
   }
 

@@ -218,7 +218,7 @@ describe("SyncRPC push convergence", () => {
 
 describe("SyncRPC pull convergence", () => {
   // Reproduces the FUSE → RPC direction observed broken in the
-  // production wsd-container example: an exec'd command writes a
+  // production container example: an exec'd command writes a
   // file through FUSE on the wsd side, and the host's
   // pullOnce(b, wsdRpc) is supposed to bring the bytes back. The
   // bug surfaced as HTTP 200 / 0 bytes on the subsequent RPC read,

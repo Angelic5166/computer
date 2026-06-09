@@ -46,7 +46,7 @@ describe("sync driver — pullOnce", () => {
       expect(applied.skipped).toEqual([]);
       expect(fileEntries(b.db)).toContain("hello.txt");
       // Asserting the bytes arrived, not just the dirent. The
-      // production wsd-container example had a path where pullOnce
+      // production container example had a path where pullOnce
       // returned 1 (entry materialised) but the file's chunks were
       // empty on the receiver — RPC reads landed HTTP 200 / 0 bytes.
       const providerB = new SQLiteWorkspaceProvider(b.db, { now: () => 1 });
