@@ -15,7 +15,40 @@
 // the JS API and the CLI ever drift, it is because someone
 // changed `git/cli.ts`, not because they touched this shim.
 
-import { type CustomCommand, decodeBytesToUtf8, defineCommand } from "just-bash";
+import { type CustomCommand, defineCommand } from "just-bash";
+
+// `ByteString` is just-bash's opaque tag over a latin1 byte buffer
+// (each JS char is one byte, 0–255). Reach into the buffer through
+// `String.prototype.charCodeAt` and feed it into TextDecoder. We
+// can't import just-bash's `decodeBytesToUtf8` directly because the
+// browser bundle the workspace bundle ends up resolving against
+// (esbuild picks `browser` over `worker` for the workspace's
+// downstream consumers) doesn't re-export it. Same semantics:
+// decode as UTF-8, fall back to the raw latin1 view on invalid
+// bytes so binary stdin still survives a pipeline.
+const UTF8_DECODER = /* @__PURE__ */ new TextDecoder("utf-8", { fatal: true });
+function decodeLatin1ToUtf8(b: string): string {
+  if (!b) return b;
+  let hasHighBit = false;
+  for (let i = 0; i < b.length; i++) {
+    const code = b.charCodeAt(i);
+    // A char above 0xff means somebody handed us real text, not a
+    // ByteString. Pass it through unchanged — mirrors just-bash's
+    // own guard.
+    if (code > 0xff) return b;
+    if (code > 0x7f) hasHighBit = true;
+  }
+  // Pure-ASCII byte buffers are already valid UTF-8; skip the
+  // round-trip.
+  if (!hasHighBit) return b;
+  const bytes = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) bytes[i] = b.charCodeAt(i);
+  try {
+    return UTF8_DECODER.decode(bytes);
+  } catch {
+    return b;
+  }
+}
 
 import type { GitCliInput, GitCliResult } from "../../git/index.js";
 
@@ -53,7 +86,9 @@ export function defineGitCommand(ws: GitCommandHost): CustomCommand {
         argv: args,
         cwd: ctx.cwd,
         env,
-        stdin: decodeBytesToUtf8(ctx.stdin),
+        // ByteString is structurally a string; the opaque tag is
+        // type-only. Cast through unknown to satisfy the decoder.
+        stdin: decodeLatin1ToUtf8(ctx.stdin as unknown as string),
       });
       return {
         stdout: result.stdout,
