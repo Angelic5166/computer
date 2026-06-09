@@ -145,7 +145,7 @@ describe("diffWith (real isomorphic-git + memfs)", () => {
   it("respects the `ref` argument when diffing against an older commit", async () => {
     await init();
     const first = await commitFile("a.txt", "v1\n", "v1");
-    await commitFile("a.txt", "v2\n", "v2"); // HEAD is now at v2.
+    await commitFile("a.txt", "v2 longer\n", "v2"); // HEAD is now at v2.
 
     // Workdir matches HEAD, but differs from `first`. Diffing against
     // HEAD returns "", diffing against `first` returns the v1->v2
@@ -154,6 +154,108 @@ describe("diffWith (real isomorphic-git + memfs)", () => {
 
     const out = await runDiff({ ref: first });
     expect(out).toContain("-v1");
-    expect(out).toContain("+v2");
+    expect(out).toContain("+v2 longer");
+  });
+});
+
+describe("diffWith ref-to-ref and path filtering", () => {
+  beforeEach(() => vol.reset());
+
+  async function runRefDiff(opts: { ref: string; to: string; paths?: string[] }): Promise<string> {
+    return diffWith({
+      git: isomorphicGit,
+      fs: memfs,
+      createPatch,
+      readFile: (path) => memfs.promises.readFile(path) as Promise<Uint8Array | string>,
+      dir: DIR,
+      ref: opts.ref,
+      to: opts.to,
+      paths: opts.paths,
+    });
+  }
+
+  it("diffs committed -> committed, ignoring the working tree", async () => {
+    await init();
+    const first = await commitFile("a.txt", "alpha\n", "v1");
+    const second = await commitFile("a.txt", "alpha beta gamma\n", "v2");
+    // Workdir matches v2; even with a mid-flight write, ref-to-ref
+    // must not look at disk.
+    await memfs.promises.writeFile(`${DIR}/a.txt`, "dirty\n");
+
+    const out = await runRefDiff({ ref: first, to: second });
+    expect(out).toContain("-alpha");
+    expect(out).toContain("+alpha beta gamma");
+    expect(out).not.toContain("dirty");
+  });
+
+  it("emits added / removed files between commits", async () => {
+    await init();
+    const first = await commitFile("keep.txt", "keep\n", "v1");
+    await memfs.promises.writeFile(`${DIR}/new.txt`, "new\n");
+    await git.add({ fs: memfs, dir: DIR, filepath: "new.txt" });
+    const second = await git.commit({
+      fs: memfs,
+      dir: DIR,
+      message: "add new",
+      author: AUTHOR,
+    });
+
+    const out = await diffWith({
+      git: isomorphicGit,
+      fs: memfs,
+      createPatch,
+      readFile: (path) => memfs.promises.readFile(path) as Promise<Uint8Array | string>,
+      dir: DIR,
+      ref: first,
+      to: second,
+    });
+    expect(out).toContain("--- new.txt");
+    expect(out).toContain("+new");
+    // keep.txt is unchanged between the two commits; must not
+    // appear in the diff.
+    expect(out).not.toContain("--- keep.txt");
+  });
+
+  it("paths restricts the diff to the listed entries", async () => {
+    await init();
+    await commitFile("keep.txt", "k1\n", "v1");
+    await commitFile("drop.txt", "d1\n", "v1d");
+    await memfs.promises.writeFile(`${DIR}/keep.txt`, "k2 longer\n");
+    await memfs.promises.writeFile(`${DIR}/drop.txt`, "d2 longer\n");
+
+    const out = await diffWith({
+      git: isomorphicGit,
+      fs: memfs,
+      createPatch,
+      readFile: (path) => memfs.promises.readFile(path) as Promise<Uint8Array | string>,
+      dir: DIR,
+      paths: ["keep.txt"],
+    });
+    expect(out).toContain("--- keep.txt");
+    expect(out).not.toContain("--- drop.txt");
+  });
+
+  it("paths matches a directory prefix", async () => {
+    await init();
+    await memfs.promises.mkdir(`${DIR}/src`, { recursive: true });
+    await memfs.promises.writeFile(`${DIR}/src/a.txt`, "src1\n");
+    await memfs.promises.writeFile(`${DIR}/top.txt`, "top1\n");
+    await git.add({ fs: memfs, dir: DIR, filepath: "src/a.txt" });
+    await git.add({ fs: memfs, dir: DIR, filepath: "top.txt" });
+    await git.commit({ fs: memfs, dir: DIR, message: "init", author: AUTHOR });
+
+    await memfs.promises.writeFile(`${DIR}/src/a.txt`, "src2 longer\n");
+    await memfs.promises.writeFile(`${DIR}/top.txt`, "top2 longer\n");
+
+    const out = await diffWith({
+      git: isomorphicGit,
+      fs: memfs,
+      createPatch,
+      readFile: (path) => memfs.promises.readFile(path) as Promise<Uint8Array | string>,
+      dir: DIR,
+      paths: ["src"],
+    });
+    expect(out).toContain("--- src/a.txt");
+    expect(out).not.toContain("--- top.txt");
   });
 });

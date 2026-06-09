@@ -100,11 +100,29 @@ export class PathspecNotFoundError extends GitError {
  */
 export function isNotARepositoryCause(cause: unknown): boolean {
   if (!(cause instanceof Error)) return false;
-  // isomorphic-git uses ENOENT-flavoured errors with an embedded
-  // path that ends in `.git`. We don't reach into private fields;
-  // a simple message-based heuristic is the cheapest reliable
-  // signal short of changing isogit.
-  const m = cause.message.toLowerCase();
+  // isomorphic-git's NotFoundError shows up in three flavours
+  // depending on how deep we got before the failure:
+  //
+  //   - VFS-level ENOENT on the gitdir itself: message contains
+  //     `.git` plus an ENOENT-shaped phrase.
+  //   - HEAD lookup before any other read: a NotFoundError whose
+  //     message reads "Could not find HEAD." / "Could not find
+  //     refs/heads/main."
+  //   - Object-store lookup: a NotFoundError on a SHA or pack.
+  //
+  // For the not-a-repo signal we want the first two: missing
+  // .git or missing HEAD. Object-store misses are a different
+  // failure mode and should not collapse to NotARepositoryError.
+  const code = (cause as { code?: unknown }).code;
+  const name = cause.name;
+  const message = cause.message;
+  if (
+    (name === "NotFoundError" || code === "NotFoundError") &&
+    /Could not find (HEAD|refs\/)/.test(message)
+  ) {
+    return true;
+  }
+  const m = message.toLowerCase();
   return (
     m.includes(".git") &&
     (m.includes("enoent") || m.includes("could not find") || m.includes("does not exist"))

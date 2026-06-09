@@ -34,6 +34,16 @@ import {
 } from "./errors.js";
 import { createGitClient, type GitClient } from "./index.js";
 import type { GitInitOptions } from "./init.js";
+import type {
+  CommitView,
+  GitCurrentBranchOptions,
+  GitLogOptions,
+  GitLsFilesOptions,
+  GitLsTreeOptions,
+  GitRevParseOptions,
+  GitShowOptions,
+  TreeEntryView,
+} from "./reads.js";
 import type { GitAddOptions, GitRmOptions } from "./staging.js";
 import type { GitStatusOptions, StatusEntry } from "./status.js";
 
@@ -45,12 +55,24 @@ interface FakeCalls {
   add: GitAddOptions[];
   rm: GitRmOptions[];
   commit: GitCommitOptions[];
+  log: GitLogOptions[];
+  show: GitShowOptions[];
+  revParse: GitRevParseOptions[];
+  currentBranch: GitCurrentBranchOptions[];
+  lsFiles: GitLsFilesOptions[];
+  lsTree: GitLsTreeOptions[];
 }
 
 function fakeClient(
   overrides: Partial<GitClient> = {},
   fakes: {
     status?: () => StatusEntry[];
+    log?: () => CommitView[];
+    show?: () => CommitView;
+    revParse?: () => string;
+    currentBranch?: () => string | undefined;
+    lsFiles?: () => string[];
+    lsTree?: () => TreeEntryView[];
   } = {},
 ): {
   client: GitClient;
@@ -64,6 +86,12 @@ function fakeClient(
     add: [],
     rm: [],
     commit: [],
+    log: [],
+    show: [],
+    revParse: [],
+    currentBranch: [],
+    lsFiles: [],
+    lsTree: [],
   };
   const client: GitClient = {
     async clone(options) {
@@ -89,6 +117,39 @@ function fakeClient(
     async commit(options): Promise<CommitResult> {
       calls.commit.push(options);
       return { oid: "a".repeat(40) };
+    },
+    async log(options = {}) {
+      calls.log.push(options);
+      return fakes.log?.() ?? [];
+    },
+    async show(options) {
+      calls.show.push(options);
+      return (
+        fakes.show?.() ?? {
+          oid: "a".repeat(40),
+          message: "",
+          tree: "",
+          parent: [],
+          author: { name: "", email: "", timestamp: 0, timezoneOffset: 0 },
+          committer: { name: "", email: "", timestamp: 0, timezoneOffset: 0 },
+        }
+      );
+    },
+    async revParse(options) {
+      calls.revParse.push(options);
+      return fakes.revParse?.() ?? "a".repeat(40);
+    },
+    async currentBranch(options = {}) {
+      calls.currentBranch.push(options);
+      return fakes.currentBranch?.();
+    },
+    async lsFiles(options = {}) {
+      calls.lsFiles.push(options);
+      return fakes.lsFiles?.() ?? [];
+    },
+    async lsTree(options) {
+      calls.lsTree.push(options);
+      return fakes.lsTree?.() ?? [];
     },
     async cli() {
       throw new Error("not reached in these tests");
@@ -271,11 +332,26 @@ describe("runGitCli — diff argv parsing", () => {
     expect(calls.diff).toEqual([{ dir: "/repo", ref: "v1.0" }]);
   });
 
-  it("rejects extra positional arguments", async () => {
+  it("passes two positional refs as from/to", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["diff", "v1", "v2"], cwd: "/r" });
+    expect(calls.diff).toEqual([{ dir: "/r", ref: "v1", to: "v2", paths: undefined }]);
+  });
+
+  it("rejects three or more refs before '--'", async () => {
     const { client } = fakeClient();
-    const res = await runGitCli(client, { argv: ["diff", "a", "b"] });
+    const res = await runGitCli(client, { argv: ["diff", "a", "b", "c"] });
     expect(res.exitCode).toBe(129);
-    expect(res.stderr).toContain("unexpected argument 'b'");
+    expect(res.stderr).toContain("too many refs");
+  });
+
+  it("paths after '--' become the paths filter", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, {
+      argv: ["diff", "v1", "v2", "--", "src/", "README.md"],
+      cwd: "/r",
+    });
+    expect(calls.diff).toEqual([{ dir: "/r", ref: "v1", to: "v2", paths: ["src/", "README.md"] }]);
   });
 
   it("returns the diff text on stdout", async () => {
@@ -508,6 +584,177 @@ describe("runGitCli — commit argv parsing", () => {
   });
 });
 
+describe("runGitCli — log argv parsing", () => {
+  const sample = (oid: string, msg: string): CommitView => ({
+    oid,
+    message: msg,
+    tree: "",
+    parent: [],
+    author: {
+      name: "A",
+      email: "a@x",
+      timestamp: 1_700_000_000,
+      timezoneOffset: 0,
+    },
+    committer: {
+      name: "A",
+      email: "a@x",
+      timestamp: 1_700_000_000,
+      timezoneOffset: 0,
+    },
+  });
+
+  it("--oneline emits one line per commit", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        log: () => [sample("a".repeat(40), "second"), sample("b".repeat(40), "first")],
+      },
+    );
+    const res = await runGitCli(client, { argv: ["log", "--oneline"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("aaaaaaa second\nbbbbbbb first\n");
+  });
+
+  it("full form emits commit / Author / Date / message blocks", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        log: () => [sample("a".repeat(40), "hello\nworld")],
+      },
+    );
+    const res = await runGitCli(client, { argv: ["log"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain(`commit ${"a".repeat(40)}`);
+    expect(res.stdout).toContain("Author: A <a@x>");
+    expect(res.stdout).toContain("    hello");
+    expect(res.stdout).toContain("    world");
+  });
+
+  it("-n forwards as depth", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["log", "-n", "3"] });
+    expect(calls.log[0].depth).toBe(3);
+  });
+
+  it("-n with a non-numeric value is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["log", "-n", "abc"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("-n");
+  });
+});
+
+describe("runGitCli — show / rev-parse / symbolic-ref", () => {
+  it("show <ref> calls show() with the resolved ref", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["show", "v1.0"], cwd: "/r" });
+    expect(calls.show).toEqual([{ dir: "/r", ref: "v1.0" }]);
+  });
+
+  it("show with no positional defaults to HEAD", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["show"] });
+    expect(calls.show[0].ref).toBe("HEAD");
+  });
+
+  it("rev-parse prints the resolved oid", async () => {
+    const { client } = fakeClient({}, { revParse: () => "deadbeef".repeat(5) });
+    const res = await runGitCli(client, { argv: ["rev-parse", "HEAD"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe(`${"deadbeef".repeat(5)}\n`);
+  });
+
+  it("rev-parse without a ref is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["rev-parse"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("missing <ref>");
+  });
+
+  it("symbolic-ref HEAD prints the full ref by default", async () => {
+    const { client, calls } = fakeClient({}, { currentBranch: () => "refs/heads/main" });
+    const res = await runGitCli(client, { argv: ["symbolic-ref", "HEAD"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("refs/heads/main\n");
+    expect(calls.currentBranch[0].fullname).toBe(true);
+  });
+
+  it("symbolic-ref --short asks for the short name", async () => {
+    const { client, calls } = fakeClient({}, { currentBranch: () => "main" });
+    const res = await runGitCli(client, { argv: ["symbolic-ref", "--short", "HEAD"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("main\n");
+    expect(calls.currentBranch[0].fullname).toBe(false);
+  });
+
+  it("symbolic-ref on detached HEAD exits 1", async () => {
+    const { client } = fakeClient({}, { currentBranch: () => undefined });
+    const res = await runGitCli(client, { argv: ["symbolic-ref", "HEAD"] });
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("not a symbolic ref");
+  });
+
+  it("symbolic-ref rejects refs other than HEAD", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["symbolic-ref", "refs/heads/foo"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("only HEAD is supported");
+  });
+});
+
+describe("runGitCli — ls-files / ls-tree", () => {
+  it("ls-files prints one filename per line", async () => {
+    const { client } = fakeClient({}, { lsFiles: () => ["a.txt", "b.txt"] });
+    const res = await runGitCli(client, { argv: ["ls-files"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("a.txt\nb.txt\n");
+  });
+
+  it("ls-files --ref forwards as the ref option", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["ls-files", "--ref", "v1"] });
+    expect(calls.lsFiles[0].ref).toBe("v1");
+  });
+
+  it("ls-files on empty list emits empty stdout (no trailing newline)", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["ls-files"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("");
+  });
+
+  it("ls-tree prints '<mode> <type> <oid>\\t<path>' lines", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        lsTree: () => [
+          { mode: "100644", path: "a.txt", oid: "a".repeat(40), type: "blob" },
+          { mode: "040000", path: "sub", oid: "b".repeat(40), type: "tree" },
+        ],
+      },
+    );
+    const res = await runGitCli(client, { argv: ["ls-tree", "HEAD"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe(
+      `100644 blob ${"a".repeat(40)}\ta.txt\n040000 tree ${"b".repeat(40)}\tsub\n`,
+    );
+  });
+
+  it("ls-tree requires a tree-ish", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["ls-tree"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("missing <tree-ish>");
+  });
+
+  it("ls-tree forwards a sub-path positional", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["ls-tree", "HEAD", "sub"] });
+    expect(calls.lsTree[0]).toMatchObject({ ref: "HEAD", path: "sub" });
+  });
+});
+
 // ---------------------------------------------------------------
 // End-to-end: real Workspace + real isomorphic-git/diff, faked
 // clone phase. Matches the pattern in clone.test.ts.
@@ -588,6 +835,41 @@ describe("runGitCli — end-to-end against an in-process Workspace", () => {
     const initAgain = await cli(["init"]);
     expect(initAgain.exitCode).toBe(128);
     expect(initAgain.stderr).toContain("already exists");
+  });
+
+  it("log / show / rev-parse / ls-files round-trip", async () => {
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      defaultGitIdentity: { name: "Test", email: "test@example.test" },
+    });
+    await ws.ready();
+    const cli = (argv: string[]) => ws.git.cli({ argv, cwd: "/" });
+    await cli(["init"]);
+    await ws.fs.writeFile("/a.txt", "hello\n");
+    await cli(["add", "a.txt"]);
+    await cli(["commit", "-m", "first"]);
+    await ws.fs.writeFile("/a.txt", "hello world longer\n");
+    await cli(["add", "a.txt"]);
+    await cli(["commit", "-m", "second"]);
+
+    const log = await cli(["log", "--oneline"]);
+    expect(log.exitCode).toBe(0);
+    const lines = log.stdout.trim().split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^[0-9a-f]{7} second$/);
+    expect(lines[1]).toMatch(/^[0-9a-f]{7} first$/);
+
+    const revParse = await cli(["rev-parse", "HEAD"]);
+    expect(revParse.exitCode).toBe(0);
+    expect(revParse.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+
+    const sym = await cli(["symbolic-ref", "--short", "HEAD"]);
+    expect(sym.exitCode).toBe(0);
+    expect(sym.stdout).toBe("main\n");
+
+    const lsFiles = await cli(["ls-files"]);
+    expect(lsFiles.exitCode).toBe(0);
+    expect(lsFiles.stdout).toBe("a.txt\n");
   });
 
   it("commit without identity surfaces as exit 128", async () => {

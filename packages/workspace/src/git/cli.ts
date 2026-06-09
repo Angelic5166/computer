@@ -100,6 +100,18 @@ export async function runGitCli(
       return await runRm(client, rest, input);
     case "commit":
       return await runCommit(client, rest, input, options);
+    case "log":
+      return await runLog(client, rest, input);
+    case "show":
+      return await runShow(client, rest, input);
+    case "rev-parse":
+      return await runRevParse(client, rest, input);
+    case "symbolic-ref":
+      return await runSymbolicRef(client, rest, input);
+    case "ls-files":
+      return await runLsFiles(client, rest, input);
+    case "ls-tree":
+      return await runLsTree(client, rest, input);
     default:
       return {
         stdout: "",
@@ -118,15 +130,21 @@ function printHelp(): GitCliResult {
     "usage: git <command> [<args>]",
     "",
     "Supported workspace git commands:",
-    "   add      Stage paths into the index.",
-    "   clone    Clone a remote repository into the workspace.",
-    "   commit   Write the current index to a new commit.",
-    "   diff     Show changes between HEAD and the working tree.",
-    "   init     Initialise a new repository.",
-    "   rm       Unstage paths from the index.",
-    "   status   Describe the working-tree / index / HEAD delta.",
-    "   help     Show this help.",
-    "   version  Print the workspace git wrapper version.",
+    "   add           Stage paths into the index.",
+    "   clone         Clone a remote repository into the workspace.",
+    "   commit        Write the current index to a new commit.",
+    "   diff          Show changes between HEAD and the working tree.",
+    "   init          Initialise a new repository.",
+    "   log           List commits reachable from HEAD.",
+    "   ls-files      List files in the index (or at a ref).",
+    "   ls-tree       List one level of a tree.",
+    "   rev-parse     Resolve a ref to its SHA-1 oid.",
+    "   rm            Unstage paths from the index.",
+    "   show          Read a single commit.",
+    "   status        Describe the working-tree / index / HEAD delta.",
+    "   symbolic-ref  Print the current branch name.",
+    "   help          Show this help.",
+    "   version       Print the workspace git wrapper version.",
     "",
   ];
   return { stdout: `${lines.join("\n")}`, stderr: "", exitCode: 0 };
@@ -239,31 +257,41 @@ async function runDiff(
   args: string[],
   input: GitCliInput,
 ): Promise<GitCliResult> {
-  // `git diff [<ref>]`. The wider git diff surface (ref↔ref,
-  // paths, etc.) lands in phase 3 alongside the expanded
-  // `diffWith`.
+  // `git diff [<ref> | <from> <to>] [-- <path>...]`. Two refs
+  // before `--` switch to ref-to-ref mode; paths after `--`
+  // filter the output.
   const parsed = parseFlags(args, {});
   if ("error" in parsed) {
     return { stdout: "", stderr: `git diff: ${parsed.error}\n`, exitCode: 129 };
   }
-  if (parsed.positional.length > 1) {
+  // Split positional on '--' — anything after is a path filter.
+  // The parser already consumes '--' and treats the rest as
+  // positional, so we need to remember where it was. Rebuild
+  // from raw argv.
+  const sep = args.indexOf("--");
+  const refArgs =
+    sep === -1 ? parsed.positional : args.slice(0, sep).filter((a) => !a.startsWith("-"));
+  const pathArgs = sep === -1 ? [] : args.slice(sep + 1);
+
+  if (refArgs.length > 2) {
     return {
       stdout: "",
-      stderr: `git diff: unexpected argument '${parsed.positional[1]}'\n`,
+      stderr: `git diff: too many refs (expected at most 2, got ${refArgs.length})\n`,
       exitCode: 129,
     };
   }
-  const ref = parsed.positional[0];
+  const [from, to] = refArgs;
   const dir = resolveDir(undefined, input.cwd);
   try {
-    const output = await client.diff({ dir, ref });
+    const output = await client.diff({
+      dir,
+      ref: from,
+      to,
+      paths: pathArgs.length > 0 ? pathArgs : undefined,
+    });
     return { stdout: output, stderr: "", exitCode: 0 };
   } catch (cause) {
-    return {
-      stdout: "",
-      stderr: `git diff: ${errorMessage(cause)}\n`,
-      exitCode: 1,
-    };
+    return mapGitError("diff", cause);
   }
 }
 
@@ -503,6 +531,270 @@ function firstLine(s: string): string {
 }
 
 // ---------------------------------------------------------------
+// log
+// ---------------------------------------------------------------
+
+async function runLog(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git log [-n <N>] [--oneline] [<ref>]`. Default output is
+  // the full commit form; --oneline collapses each entry to a
+  // single line.
+  const parsed = parseFlags(args, {
+    n: { kind: "value" },
+    oneline: { kind: "bool" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git log: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 1) {
+    return {
+      stdout: "",
+      stderr: `git log: unexpected argument '${parsed.positional[1]}'\n`,
+      exitCode: 129,
+    };
+  }
+  let depth: number | undefined;
+  if (parsed.flags.n !== undefined) {
+    const v = Number.parseInt(parsed.flags.n as string, 10);
+    if (!Number.isFinite(v) || v < 1) {
+      return {
+        stdout: "",
+        stderr: `git log: -n requires a positive integer (got ${JSON.stringify(parsed.flags.n)})\n`,
+        exitCode: 129,
+      };
+    }
+    depth = v;
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const commits = await client.log({ dir, ref: parsed.positional[0], depth });
+    const stdout = parsed.flags.oneline ? formatLogOneline(commits) : formatLogFull(commits);
+    return { stdout, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("log", cause);
+  }
+}
+
+function formatLogOneline(commits: import("./reads.js").CommitView[]): string {
+  if (commits.length === 0) return "";
+  return `${commits.map((c) => `${c.oid.slice(0, 7)} ${firstLine(c.message)}`).join("\n")}\n`;
+}
+
+function formatLogFull(commits: import("./reads.js").CommitView[]): string {
+  if (commits.length === 0) return "";
+  const blocks: string[] = [];
+  for (const c of commits) {
+    const lines = [
+      `commit ${c.oid}`,
+      `Author: ${c.author.name} <${c.author.email}>`,
+      `Date:   ${formatGitTimestamp(c.author.timestamp, c.author.timezoneOffset)}`,
+      "",
+      ...c.message.split("\n").map((l) => `    ${l}`),
+    ];
+    blocks.push(lines.join("\n"));
+  }
+  return `${blocks.join("\n\n")}\n`;
+}
+
+function formatGitTimestamp(timestamp: number, timezoneOffset: number): string {
+  // isomorphic-git stores timezoneOffset as minutes east of UTC,
+  // but git's wire format is `git log`'s output uses minutes
+  // west (the inverse). The two are negatives of each other;
+  // pick the convention real git users see.
+  const d = new Date(timestamp * 1000);
+  const offsetMinutes = -timezoneOffset;
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMinutes);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `${d
+    .toISOString()
+    .replace("T", " ")
+    .replace(/\.\d{3}Z$/, "")} ${sign}${hh}${mm}`;
+}
+
+// ---------------------------------------------------------------
+// show
+// ---------------------------------------------------------------
+
+async function runShow(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  const parsed = parseFlags(args, {});
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git show: ${parsed.error}\n`, exitCode: 129 };
+  }
+  const ref = parsed.positional[0] ?? "HEAD";
+  if (parsed.positional.length > 1) {
+    return {
+      stdout: "",
+      stderr: `git show: unexpected argument '${parsed.positional[1]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const c = await client.show({ dir, ref });
+    return { stdout: formatLogFull([c]), stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("show", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// rev-parse
+// ---------------------------------------------------------------
+
+async function runRevParse(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  const parsed = parseFlags(args, {});
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git rev-parse: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length === 0) {
+    return { stdout: "", stderr: "git rev-parse: missing <ref>\n", exitCode: 129 };
+  }
+  if (parsed.positional.length > 1) {
+    return {
+      stdout: "",
+      stderr: `git rev-parse: unexpected argument '${parsed.positional[1]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const oid = await client.revParse({ dir, ref: parsed.positional[0] });
+    return { stdout: `${oid}\n`, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("rev-parse", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// symbolic-ref (current-branch)
+// ---------------------------------------------------------------
+
+async function runSymbolicRef(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // Limited surface: only `git symbolic-ref HEAD` and the bare
+  // `git symbolic-ref` (which behaves like the previous form).
+  const parsed = parseFlags(args, {
+    short: { kind: "bool" },
+    quiet: { kind: "bool", alias: ["q"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git symbolic-ref: ${parsed.error}\n`, exitCode: 129 };
+  }
+  const ref = parsed.positional[0] ?? "HEAD";
+  if (ref !== "HEAD") {
+    return {
+      stdout: "",
+      stderr: `git symbolic-ref: only HEAD is supported (got ${JSON.stringify(ref)})\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const name = await client.currentBranch({
+      dir,
+      fullname: parsed.flags.short !== true,
+    });
+    if (name === undefined) {
+      // Detached HEAD: real git exits 1 with empty stdout when
+      // --quiet, otherwise an error message.
+      if (parsed.flags.quiet) return { stdout: "", stderr: "", exitCode: 1 };
+      return {
+        stdout: "",
+        stderr: "git symbolic-ref: ref HEAD is not a symbolic ref\n",
+        exitCode: 1,
+      };
+    }
+    return { stdout: `${name}\n`, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("symbolic-ref", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// ls-files
+// ---------------------------------------------------------------
+
+async function runLsFiles(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  const parsed = parseFlags(args, {
+    ref: { kind: "value" },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git ls-files: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length > 0) {
+    return {
+      stdout: "",
+      stderr: `git ls-files: unexpected argument '${parsed.positional[0]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const files = await client.lsFiles({ dir, ref: parsed.flags.ref as string | undefined });
+    return { stdout: files.length === 0 ? "" : `${files.join("\n")}\n`, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("ls-files", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// ls-tree
+// ---------------------------------------------------------------
+
+async function runLsTree(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  const parsed = parseFlags(args, {});
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git ls-tree: ${parsed.error}\n`, exitCode: 129 };
+  }
+  if (parsed.positional.length === 0) {
+    return { stdout: "", stderr: "git ls-tree: missing <tree-ish>\n", exitCode: 129 };
+  }
+  if (parsed.positional.length > 2) {
+    return {
+      stdout: "",
+      stderr: `git ls-tree: unexpected argument '${parsed.positional[2]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const [ref, subpath] = parsed.positional;
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    const entries = await client.lsTree({ dir, ref, path: subpath });
+    if (entries.length === 0) return { stdout: "", stderr: "", exitCode: 0 };
+    // Match real git's `git ls-tree` line format:
+    //   <mode> SP <type> SP <oid> TAB <path>
+    const lines = entries.map((e) => `${e.mode} ${e.type} ${e.oid}\t${e.path}`);
+    return { stdout: `${lines.join("\n")}\n`, stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("ls-tree", cause);
+  }
+}
+
+// ---------------------------------------------------------------
 // shared error mapping
 // ---------------------------------------------------------------
 
@@ -623,7 +915,11 @@ function parseFlags(args: string[], spec: Record<string, FlagSpec>): ParseResult
     }
     if (arg.startsWith("-") && arg.length > 1) {
       const short = arg.slice(1);
-      const name = aliasMap.get(short);
+      // Look up by alias first; fall back to a spec entry whose
+      // *name* is a single char matching the short form (so a
+      // spec like `{ n: { kind: "value" } }` accepts `-n` without
+      // declaring `alias: ["n"]`).
+      const name = aliasMap.get(short) ?? (spec[short] ? short : undefined);
       if (!name) return { error: `unknown option '-${short}'` };
       const s = spec[name];
       if (s.kind === "bool" || s.kind === "value-or-bool") {

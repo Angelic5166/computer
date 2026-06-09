@@ -40,6 +40,23 @@ import {
 } from "./diff.js";
 import { type GitInitOptions, type IsomorphicGitInitClient, initWith } from "./init.js";
 import {
+  type CommitView,
+  currentBranchWith,
+  type GitCurrentBranchOptions,
+  type GitLogOptions,
+  type GitLsFilesOptions,
+  type GitLsTreeOptions,
+  type GitRevParseOptions,
+  type GitShowOptions,
+  type IsomorphicGitReadsClient,
+  logWith,
+  lsFilesWith,
+  lsTreeWith,
+  revParseWith,
+  showWith,
+  type TreeEntryView,
+} from "./reads.js";
+import {
   addWith,
   type GitAddOptions,
   type GitRmOptions,
@@ -67,6 +84,16 @@ export {
   PathspecNotFoundError,
 } from "./errors.js";
 export type { GitInitOptions } from "./init.js";
+export type {
+  CommitView,
+  GitCurrentBranchOptions,
+  GitLogOptions,
+  GitLsFilesOptions,
+  GitLsTreeOptions,
+  GitRevParseOptions,
+  GitShowOptions,
+  TreeEntryView,
+} from "./reads.js";
 export type { GitAddOptions, GitRmOptions } from "./staging.js";
 export type { GitStatusOptions, StatusEntry } from "./status.js";
 
@@ -102,6 +129,18 @@ export interface GitClient {
   rm(options: GitRmOptions): Promise<void>;
   /** Write the current index to a new commit on HEAD. */
   commit(options: GitCommitOptions): Promise<CommitResult>;
+  /** Walk commits from `ref` (default HEAD) backwards through history. */
+  log(options?: GitLogOptions): Promise<CommitView[]>;
+  /** Read a single commit by ref or oid. */
+  show(options: GitShowOptions): Promise<CommitView>;
+  /** Resolve a ref to its SHA-1 oid. */
+  revParse(options: GitRevParseOptions): Promise<string>;
+  /** Current branch name, or undefined on detached HEAD. */
+  currentBranch(options?: GitCurrentBranchOptions): Promise<string | undefined>;
+  /** List files in the index (or at a given ref). */
+  lsFiles(options?: GitLsFilesOptions): Promise<string[]>;
+  /** List one level of a tree (or sub-tree). */
+  lsTree(options: GitLsTreeOptions): Promise<TreeEntryView[]>;
   /**
    * Argv-driven entry point. The worker-backend's `git` custom
    * command dispatches through this; in-process callers can use
@@ -239,6 +278,52 @@ export function createGitClient({
         git: await loadGit<IsomorphicGitCommitClient>(),
         cache,
         defaultIdentity,
+      });
+    },
+    async log(options = {}) {
+      return logWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitReadsClient>(),
+        cache,
+      });
+    },
+    async show(options) {
+      return showWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitReadsClient>(),
+        cache,
+      });
+    },
+    async revParse(options) {
+      return revParseWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitReadsClient>(),
+      });
+    },
+    async currentBranch(options = {}) {
+      return currentBranchWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitReadsClient>(),
+      });
+    },
+    async lsFiles(options = {}) {
+      return lsFilesWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitReadsClient>(),
+        cache,
+      });
+    },
+    async lsTree(options) {
+      return lsTreeWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitReadsClient>(),
+        cache,
       });
     },
     async cli(input) {
