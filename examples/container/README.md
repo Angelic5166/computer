@@ -1,4 +1,4 @@
-# wsd-container example
+# container example
 
 > [!IMPORTANT]
 > **PREVIEW ONLY** This package is provided as a preview for feedback only.
@@ -26,8 +26,9 @@ client ─► Worker /c/<name>/{file,exec}
 ```
 
 1. The DO constructs a `CloudflareContainerBackend` from
-   `@cloudflare/workspace` and hands it to a `Workspace` instance.
-   That backend owns the entire wsd lifecycle: container start,
+   `@cloudflare/workspace/backends/container` and hands it to a
+   `Workspace` instance. That backend owns the entire wsd lifecycle:
+   container start,
    outbound egress interception, port-readiness polling, POST
    `/connect` to wsd, `/ws` upgrade routing, and capnweb session
    attach.
@@ -96,10 +97,10 @@ which contains the bytes `hello world`):
 
 ```sh
 # Local miniflare bucket — use this with `wrangler dev`.
-npm run seed:r2:local --workspace @cloudflare/example-wsd-container
+npm run seed:r2:local --workspace @example/workspace-container
 
 # Real Cloudflare R2 bucket — use this after `wrangler deploy`.
-npm run seed:r2 --workspace @cloudflare/example-wsd-container
+npm run seed:r2 --workspace @example/workspace-container
 ```
 
 Then:
@@ -147,7 +148,7 @@ public GitHub Container Registry on first build, so no local image
 prep is needed.
 
 ```sh
-npm run dev --workspace @cloudflare/example-wsd-container
+npm run dev --workspace @example/workspace-container
 ```
 
 Smoke test:
@@ -172,7 +173,7 @@ curl -X POST http://127.0.0.1:8787/c/demo/exec \
 ## Layout
 
 ```
-examples/wsd-container/
+examples/container/
   Dockerfile                debian + libfuse + wsd binary (ENTRYPOINT)
   wrangler.jsonc            Worker + DO + Container binding
   src/index.ts              Worker handler, DO (ContainerExample)

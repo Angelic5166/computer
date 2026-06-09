@@ -20,14 +20,16 @@
 import { DurableObject, tracing } from "cloudflare:workers";
 
 import {
-  CloudflareContainerBackend,
   type DurableObjectStorageLike,
   R2Bucket,
   Workspace,
   WorkspaceProxy,
   type WorkspaceStub,
-  withWorkspaceContainer,
 } from "@cloudflare/workspace";
+import {
+  CloudflareContainerBackend,
+  withWorkspaceContainer,
+} from "@cloudflare/workspace/backends/container";
 import { createCloudflareObserver } from "@cloudflare/workspace/observe/cloudflare";
 
 // Re-export so the runtime can build a loopback binding for the
@@ -148,7 +150,7 @@ export default {
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(
         [
-          "wsd-container example",
+          "container example",
           "",
           `  PUT  /c/<name>/file/workspace/<path>     write file at ${MOUNT_ROOT}/<path>`,
           `  GET  /c/<name>/file/workspace/<path>     read file at ${MOUNT_ROOT}/<path>`,

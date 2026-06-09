@@ -1,4 +1,4 @@
-# Container image for the wsd-container example.
+# Container image for the container example.
 #
 # Pulls the wsd binary out of the public GHCR image. That image is
 # a single layer over `scratch` whose only contents are the SEA
