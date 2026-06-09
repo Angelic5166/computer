@@ -62,6 +62,83 @@ Deliberate omissions, with rationale:
   concrete caller needs them; each can land as its own
   follow-up.
 
+## Known gaps
+
+The items below are intended to work but currently don't, or
+work in a way that differs from real git in a surprising way.
+Each is something to fix rather than a deliberate omission.
+
+- **`clone` with no destination clones into `cwd` rather than
+  into a subdirectory named after the repo.** Real git derives
+  the destination from the last path segment of the URL when
+  no positional `<dir>` is given (so `git clone
+  https://github.com/owner/repo.git` lands in `./repo`). The
+  workspace CLI resolves the missing positional to `cwd`
+  itself, so the working tree is unpacked alongside whatever
+  else is already there. Workaround: pass an explicit
+  destination.
+
+- **`commit` does not read identity from `user.name` and
+  `user.email` in the local config.** `config user.email
+  "..."` writes to `<dir>/.git/config` and `config user.email`
+  reads it back, but `commit` resolves identity only from
+  explicit `options.author`, then `GIT_AUTHOR_*` /
+  `GIT_COMMITTER_*` env, then the `defaultIdentity` threaded
+  through `createGitClient`. The local config is never
+  consulted. Workaround: pass `--author "Name <email>"`, set
+  the env vars, or configure `defaultGitIdentity` on the
+  `Workspace` constructor.
+
+- **Revision-suffix syntax is not supported.** `HEAD^`,
+  `HEAD~1`, `HEAD~2`, `<branch>^`, and the rest of git's
+  `gitrevisions(7)` walk syntax are not parsed by `rev-parse`
+  or any other subcommand. A literal `HEAD` or a full / short
+  oid is the only accepted spelling. Workaround: resolve the
+  ancestor with `log -n 2 --oneline` and pass the explicit
+  oid.
+
+- **Initial HEAD after `clone` resolves as a detached oid,
+  not a symbolic ref to `refs/heads/<branch>`.**
+  `symbolic-ref HEAD` fails with `ref HEAD is not a symbolic
+  ref` immediately after a clone, even though `branch` shows
+  the cloned branch as current. An explicit `checkout
+  <branch>` rewrites HEAD as a symref and `symbolic-ref`
+  starts working. The underlying `isomorphic-git.clone`
+  writes HEAD this way; the wrapper does not re-attach it.
+  Workaround: `checkout <branch>` once after `clone`.
+
+- **The working tree is shared across branches; `checkout`
+  updates HEAD and the index but does not reconcile
+  untracked files.** A file created on `feature` and never
+  committed remains on disk after switching to `main`, and
+  `status` reports it as untracked on every branch. Real git
+  carries the same behavior for untracked files, but it also
+  removes tracked-on-one-branch / absent-on-the-other files
+  from disk on checkout; the workspace CLI does not. Reach
+  for `rm` before `checkout` if a clean working tree matters.
+
+- **Several real-git flags are rejected as unknown.**
+  `branch -a`, `show --stat`, `hash-object <path>` (the
+  file-path form, only `--stdin` is supported), and a wider
+  set of long-option flags listed in each command's *Not
+  mapped* block above. Real-git muscle memory invocations
+  like `git log -1` (the `-N` shorthand for `--max-count=N`)
+  are also rejected; use `git log -n 1` instead. The CLI
+  exits 129 with an `unknown option '...'` line on stderr.
+
+- **Symlinks in a cloned tree are checked out as symlinks
+  but the target may not resolve.** `clone` materializes
+  mode-`120000` entries as symbolic links in the workspace
+  VFS, but a downstream `read` / `cat` of one through the
+  shell can produce `No such file or directory` if the target
+  is a path outside what the clone wrote. Top-level
+  redirects (`README.md -> packages/foo/README.md`) on
+  symlinked-readme repositories are the most common case.
+  Workaround: read the symlink target with `readlink` or
+  walk the link manually through `fs.readlink`.
+
+File a bug if you hit one of these and need a fix prioritized.
+
 ## Quick start
 
 Three flavors of the same task — clone a repo, mutate a file,
