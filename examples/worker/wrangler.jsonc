@@ -1,0 +1,49 @@
+{
+  // Example: Worker + Durable Object that runs a Workspace whose
+  // shell is a Dynamic Worker loaded through env.LOADER.
+  //
+  // Mirrors examples/container beat for beat — same DO class
+  // name, same routes, same R2 mount. The only difference is the
+  // shell: a Dynamic Worker instead of a container running wsd.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "workspace-worker-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-26",
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+
+  // Worker Loader binding. The DO calls env.LOADER.get(id, ...)
+  // to mint a Dynamic Worker that the WorkerBackend then
+  // dispatches shell.exec into.
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ContainerExample",
+        "class_name": "ContainerExample"
+      }
+    ]
+  },
+
+  // R2 bucket mounted into every Workspace at /workspace/r2 via
+  // R2Bucket(...). Seed it once with:
+  //   npm run seed:r2 --workspace @example/workspace-worker
+  // which uploads ./seed/data/hello.txt to the bucket.
+  "r2_buckets": [
+    {
+      "binding": "Bucket",
+      "bucket_name": "workspace-worker-hello"
+    }
+  ],
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ContainerExample"]
+    }
+  ]
+}
