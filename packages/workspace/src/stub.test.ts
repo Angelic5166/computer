@@ -16,7 +16,12 @@ import { enableStubTracking, stubSnapshot } from "@cloudflare/workspace-rpc/debu
 import { beforeAll, describe, expect, it } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
-import { WorkspaceExecHandleStub, WorkspaceFilesystemStub, WorkspaceShellStub } from "./stub.js";
+import {
+  WorkspaceExecHandleStub,
+  WorkspaceFilesystemStub,
+  WorkspaceGitStub,
+  WorkspaceShellStub,
+} from "./stub.js";
 import { Workspace } from "./workspace.js";
 
 function composite(
@@ -111,7 +116,7 @@ async function withStub<T>(
 }
 
 describe("WorkspaceStub", () => {
-  it("exposes fs and shell as accessor properties (RPC visibility)", async () => {
+  it("exposes fs, shell, and git as accessor properties (RPC visibility)", async () => {
     // Plain readonly fields would land as private isolate state on
     // the RPC stub and report "method not implemented". The class
     // uses getters; pin that here by checking the descriptor.
@@ -119,10 +124,22 @@ describe("WorkspaceStub", () => {
       const stub = ws.stub();
       const fsDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(stub), "fs");
       const shellDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(stub), "shell");
+      const gitDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(stub), "git");
       expect(fsDesc?.get).toBeTypeOf("function");
       expect(shellDesc?.get).toBeTypeOf("function");
+      expect(gitDesc?.get).toBeTypeOf("function");
       expect(stub.fs).toBeInstanceOf(WorkspaceFilesystemStub);
       expect(stub.shell).toBeInstanceOf(WorkspaceShellStub);
+      expect(stub.git).toBeInstanceOf(WorkspaceGitStub);
+    });
+  });
+
+  it("git.cli forwards through to the underlying Workspace", async () => {
+    await withStub(async (ws) => {
+      const stub = ws.stub();
+      const res = await stub.git.cli({ argv: ["help"] });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout).toContain("usage: git");
     });
   });
 
@@ -244,34 +261,30 @@ describe("WorkspaceStub", () => {
       enableStubTracking();
     });
 
-    it("disposing the parent stub releases fs and shell sub-stubs", async () => {
+    it("disposing the parent stub releases fs, shell, and git sub-stubs", async () => {
       await withStub(async (ws) => {
-        const before = snapshotOf([
+        const names = [
           "WorkspaceStub",
           "WorkspaceFilesystemStub",
           "WorkspaceShellStub",
-        ]);
+          "WorkspaceGitStub",
+        ];
+        const before = snapshotOf(names);
         {
           using stub = ws.stub();
-          // Touch both halves so any lazy construction lands.
+          // Touch every half so any lazy construction lands.
           expect(stub.fs).toBeInstanceOf(WorkspaceFilesystemStub);
           expect(stub.shell).toBeInstanceOf(WorkspaceShellStub);
-          const live = snapshotOf([
-            "WorkspaceStub",
-            "WorkspaceFilesystemStub",
-            "WorkspaceShellStub",
-          ]);
+          expect(stub.git).toBeInstanceOf(WorkspaceGitStub);
+          const live = snapshotOf(names);
           expect(live.WorkspaceStub).toBe(before.WorkspaceStub + 1);
           expect(live.WorkspaceFilesystemStub).toBe(before.WorkspaceFilesystemStub + 1);
           expect(live.WorkspaceShellStub).toBe(before.WorkspaceShellStub + 1);
+          expect(live.WorkspaceGitStub).toBe(before.WorkspaceGitStub + 1);
         }
         // Out of scope — `using` ran Symbol.dispose on the parent,
-        // which cascades to fs and shell.
-        const after = snapshotOf([
-          "WorkspaceStub",
-          "WorkspaceFilesystemStub",
-          "WorkspaceShellStub",
-        ]);
+        // which cascades to fs, shell, and git.
+        const after = snapshotOf(names);
         expect(after).toEqual(before);
       });
     });

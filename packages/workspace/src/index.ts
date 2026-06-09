@@ -61,6 +61,7 @@ export {
   type WorkspaceExecOptions,
   type WorkspaceExecResult,
   WorkspaceFilesystemStub,
+  WorkspaceGitStub,
   WorkspaceShellStub,
   WorkspaceStub,
 } from "./stub.js";

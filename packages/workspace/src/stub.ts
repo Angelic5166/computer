@@ -57,6 +57,7 @@ import type {
 import { trackStub, untrackStub } from "@cloudflare/workspace-rpc/debug";
 import { RpcTarget } from "capnweb";
 
+import type { GitCliInput, GitCliResult } from "./git/index.js";
 import { withSpan } from "./observe.js";
 import type { ExecResult } from "./shell.js";
 import type { Workspace } from "./workspace.js";
@@ -273,6 +274,34 @@ export class WorkspaceExecHandleStub<E extends "utf8" | undefined = undefined> e
   }
 }
 
+// Git half. Pure value returns — every method takes JSRPC-
+// friendly inputs (strings, plain objects) and resolves to a
+// plain `{ stdout, stderr, exitCode }`. No nested stubs to
+// dispose; the parent `WorkspaceStub` cascades disposal into
+// this one for symmetry with `fs` / `shell`.
+//
+// Phase 1 surfaces only `cli` here. The typed `clone` / `diff`
+// methods stay DO-side; their inputs (progress callbacks,
+// onAuth) don't cross Workers RPC cleanly, and the CLI path
+// covers every consumer who needs git access through a stub.
+export class WorkspaceGitStub extends RpcTarget {
+  readonly #ws: Workspace;
+
+  constructor(ws: Workspace) {
+    super();
+    this.#ws = ws;
+    trackStub(this);
+  }
+
+  [Symbol.dispose](): void {
+    untrackStub(this);
+  }
+
+  cli(input: GitCliInput): Promise<GitCliResult> {
+    return this.#ws.git.cli(input);
+  }
+}
+
 // Shell half. exec() returns an RpcTarget handle whose only
 // method today is result(). Streaming exec lands as a separate
 // method when a concrete caller needs it; see the note at the
@@ -369,11 +398,13 @@ export class WorkspaceStub extends RpcTarget {
   // proxy reports "method not implemented".
   readonly #fs: WorkspaceFilesystemStub;
   readonly #shell: WorkspaceShellStub;
+  readonly #git: WorkspaceGitStub;
 
   constructor(ws: Workspace) {
     super();
     this.#fs = new WorkspaceFilesystemStub(ws);
     this.#shell = new WorkspaceShellStub(ws);
+    this.#git = new WorkspaceGitStub(ws);
     trackStub(this);
   }
 
@@ -386,6 +417,7 @@ export class WorkspaceStub extends RpcTarget {
   [Symbol.dispose](): void {
     this.#fs[Symbol.dispose]();
     this.#shell[Symbol.dispose]();
+    this.#git[Symbol.dispose]();
     untrackStub(this);
   }
 
@@ -395,5 +427,9 @@ export class WorkspaceStub extends RpcTarget {
 
   get shell(): WorkspaceShellStub {
     return this.#shell;
+  }
+
+  get git(): WorkspaceGitStub {
+    return this.#git;
   }
 }
