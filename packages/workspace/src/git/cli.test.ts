@@ -44,6 +44,15 @@ import type {
   GitShowOptions,
   TreeEntryView,
 } from "./reads.js";
+import type {
+  GitBranchDeleteOptions,
+  GitBranchListOptions,
+  GitBranchOptions,
+  GitCheckoutOptions,
+  GitTagDeleteOptions,
+  GitTagListOptions,
+  GitTagOptions,
+} from "./refs.js";
 import type { GitAddOptions, GitRmOptions } from "./staging.js";
 import type { GitStatusOptions, StatusEntry } from "./status.js";
 
@@ -61,6 +70,13 @@ interface FakeCalls {
   currentBranch: GitCurrentBranchOptions[];
   lsFiles: GitLsFilesOptions[];
   lsTree: GitLsTreeOptions[];
+  branch: GitBranchOptions[];
+  branchDelete: GitBranchDeleteOptions[];
+  branchList: GitBranchListOptions[];
+  tag: GitTagOptions[];
+  tagDelete: GitTagDeleteOptions[];
+  tagList: GitTagListOptions[];
+  checkout: GitCheckoutOptions[];
 }
 
 function fakeClient(
@@ -73,6 +89,8 @@ function fakeClient(
     currentBranch?: () => string | undefined;
     lsFiles?: () => string[];
     lsTree?: () => TreeEntryView[];
+    branchList?: () => string[];
+    tagList?: () => string[];
   } = {},
 ): {
   client: GitClient;
@@ -92,6 +110,13 @@ function fakeClient(
     currentBranch: [],
     lsFiles: [],
     lsTree: [],
+    branch: [],
+    branchDelete: [],
+    branchList: [],
+    tag: [],
+    tagDelete: [],
+    tagList: [],
+    checkout: [],
   };
   const client: GitClient = {
     async clone(options) {
@@ -150,6 +175,29 @@ function fakeClient(
     async lsTree(options) {
       calls.lsTree.push(options);
       return fakes.lsTree?.() ?? [];
+    },
+    async branch(options) {
+      calls.branch.push(options);
+    },
+    async branchDelete(options) {
+      calls.branchDelete.push(options);
+    },
+    async branchList(options = {}) {
+      calls.branchList.push(options);
+      return fakes.branchList?.() ?? [];
+    },
+    async tag(options) {
+      calls.tag.push(options);
+    },
+    async tagDelete(options) {
+      calls.tagDelete.push(options);
+    },
+    async tagList(options = {}) {
+      calls.tagList.push(options);
+      return fakes.tagList?.() ?? [];
+    },
+    async checkout(options) {
+      calls.checkout.push(options);
     },
     async cli() {
       throw new Error("not reached in these tests");
@@ -755,6 +803,117 @@ describe("runGitCli — ls-files / ls-tree", () => {
   });
 });
 
+describe("runGitCli — branch argv parsing", () => {
+  it("bare `branch` lists branches with a leading '* ' on current", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        branchList: () => ["feature", "main"],
+        currentBranch: () => "main",
+      },
+    );
+    const res = await runGitCli(client, { argv: ["branch"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("  feature\n* main\n");
+  });
+
+  it("branch <name> creates a branch at HEAD", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, { argv: ["branch", "feature"], cwd: "/r" });
+    expect(res.exitCode).toBe(0);
+    expect(calls.branch).toEqual([
+      { dir: "/r", name: "feature", startPoint: undefined, force: false },
+    ]);
+  });
+
+  it("branch <name> <start> passes the start point through", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["branch", "feature", "v1"] });
+    expect(calls.branch[0]).toMatchObject({ name: "feature", startPoint: "v1" });
+  });
+
+  it("branch -d <name> deletes a branch", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, { argv: ["branch", "-d", "feature"] });
+    expect(res.exitCode).toBe(0);
+    expect(calls.branchDelete).toEqual([{ dir: "/", name: "feature" }]);
+    expect(calls.branch).toEqual([]);
+  });
+
+  it("branch -d with no name is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["branch", "-d"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("-d requires a branch name");
+  });
+
+  it("branch --force flips the option", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["branch", "--force", "feature", "v1"] });
+    expect(calls.branch[0].force).toBe(true);
+  });
+});
+
+describe("runGitCli — tag argv parsing", () => {
+  it("bare `tag` lists tags lexicographically", async () => {
+    const { client } = fakeClient({}, { tagList: () => ["v2", "v1"] });
+    const res = await runGitCli(client, { argv: ["tag"] });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toBe("v1\nv2\n");
+  });
+
+  it("tag <name> creates a tag at HEAD", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, { argv: ["tag", "v1.0"], cwd: "/r" });
+    expect(res.exitCode).toBe(0);
+    expect(calls.tag).toEqual([{ dir: "/r", name: "v1.0", object: undefined, force: false }]);
+  });
+
+  it("tag <name> <object> tags a specific commit", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["tag", "v1.0", "deadbee"] });
+    expect(calls.tag[0]).toMatchObject({ name: "v1.0", object: "deadbee" });
+  });
+
+  it("tag -d <name> deletes a tag", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, { argv: ["tag", "-d", "v1.0"] });
+    expect(res.exitCode).toBe(0);
+    expect(calls.tagDelete).toEqual([{ dir: "/", name: "v1.0" }]);
+  });
+});
+
+describe("runGitCli — checkout argv parsing", () => {
+  it("checkout <ref> moves HEAD", async () => {
+    const { client, calls } = fakeClient();
+    const res = await runGitCli(client, { argv: ["checkout", "feature"], cwd: "/r" });
+    expect(res.exitCode).toBe(0);
+    expect(calls.checkout).toEqual([{ dir: "/r", ref: "feature", paths: undefined, force: false }]);
+  });
+
+  it("paths after '--' switch to path-scoped checkout", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["checkout", "v1", "--", "a.txt", "b.txt"] });
+    expect(calls.checkout[0]).toMatchObject({
+      ref: "v1",
+      paths: ["a.txt", "b.txt"],
+    });
+  });
+
+  it("--force flips the option", async () => {
+    const { client, calls } = fakeClient();
+    await runGitCli(client, { argv: ["checkout", "--force", "v1"] });
+    expect(calls.checkout[0].force).toBe(true);
+  });
+
+  it("checkout with no ref is an error", async () => {
+    const { client } = fakeClient();
+    const res = await runGitCli(client, { argv: ["checkout"] });
+    expect(res.exitCode).toBe(129);
+    expect(res.stderr).toContain("missing <ref>");
+  });
+});
+
 // ---------------------------------------------------------------
 // End-to-end: real Workspace + real isomorphic-git/diff, faked
 // clone phase. Matches the pattern in clone.test.ts.
@@ -870,6 +1029,40 @@ describe("runGitCli — end-to-end against an in-process Workspace", () => {
     const lsFiles = await cli(["ls-files"]);
     expect(lsFiles.exitCode).toBe(0);
     expect(lsFiles.stdout).toBe("a.txt\n");
+  });
+
+  it("branch / checkout / tag round-trip moves HEAD and creates refs", async () => {
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      defaultGitIdentity: { name: "Test", email: "test@example.test" },
+    });
+    await ws.ready();
+    const cli = (argv: string[]) => ws.git.cli({ argv, cwd: "/" });
+    await cli(["init"]);
+    await ws.fs.writeFile("/a.txt", "hello\n");
+    await cli(["add", "a.txt"]);
+    await cli(["commit", "-m", "init"]);
+
+    // Create and switch to a feature branch.
+    expect((await cli(["branch", "feature"])).exitCode).toBe(0);
+    expect((await cli(["checkout", "feature"])).exitCode).toBe(0);
+    const sym = await cli(["symbolic-ref", "--short", "HEAD"]);
+    expect(sym.stdout).toBe("feature\n");
+
+    // Tag the current commit.
+    expect((await cli(["tag", "v1.0"])).exitCode).toBe(0);
+    const tags = await cli(["tag"]);
+    expect(tags.stdout).toBe("v1.0\n");
+
+    // Bare branch listing marks the current with '* '.
+    const branches = await cli(["branch"]);
+    expect(branches.stdout.split("\n").filter(Boolean).sort()).toEqual(["  main", "* feature"]);
+
+    // Switching back and deleting feature.
+    await cli(["checkout", "main"]);
+    expect((await cli(["branch", "-d", "feature"])).exitCode).toBe(0);
+    const branches2 = await cli(["branch"]);
+    expect(branches2.stdout).toBe("* main\n");
   });
 
   it("commit without identity surfaces as exit 128", async () => {

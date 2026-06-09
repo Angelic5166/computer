@@ -112,6 +112,12 @@ export async function runGitCli(
       return await runLsFiles(client, rest, input);
     case "ls-tree":
       return await runLsTree(client, rest, input);
+    case "branch":
+      return await runBranch(client, rest, input);
+    case "tag":
+      return await runTag(client, rest, input);
+    case "checkout":
+      return await runCheckout(client, rest, input);
     default:
       return {
         stdout: "",
@@ -131,6 +137,8 @@ function printHelp(): GitCliResult {
     "",
     "Supported workspace git commands:",
     "   add           Stage paths into the index.",
+    "   branch        Create, delete, or list branches.",
+    "   checkout      Move HEAD to a ref, or restore paths.",
     "   clone         Clone a remote repository into the workspace.",
     "   commit        Write the current index to a new commit.",
     "   diff          Show changes between HEAD and the working tree.",
@@ -143,6 +151,7 @@ function printHelp(): GitCliResult {
     "   show          Read a single commit.",
     "   status        Describe the working-tree / index / HEAD delta.",
     "   symbolic-ref  Print the current branch name.",
+    "   tag           Create, delete, or list tags.",
     "   help          Show this help.",
     "   version       Print the workspace git wrapper version.",
     "",
@@ -791,6 +800,208 @@ async function runLsTree(
     return { stdout: `${lines.join("\n")}\n`, stderr: "", exitCode: 0 };
   } catch (cause) {
     return mapGitError("ls-tree", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// branch
+// ---------------------------------------------------------------
+
+async function runBranch(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git branch` modes:
+  //   bare           -> list local branches
+  //   <name>         -> create branch at HEAD
+  //   <name> <start> -> create branch at <start>
+  //   -d <name>      -> delete branch
+  //   --force        -> overwrite when creating
+  const parsed = parseFlags(args, {
+    d: { kind: "bool" },
+    D: { kind: "bool" },
+    delete: { kind: "bool" },
+    force: { kind: "bool", alias: ["f"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git branch: ${parsed.error}\n`, exitCode: 129 };
+  }
+  const wantDelete =
+    parsed.flags.d === true || parsed.flags.D === true || parsed.flags.delete === true;
+  const dir = resolveDir(undefined, input.cwd);
+
+  if (wantDelete) {
+    if (parsed.positional.length === 0) {
+      return {
+        stdout: "",
+        stderr: "git branch: -d requires a branch name\n",
+        exitCode: 129,
+      };
+    }
+    try {
+      for (const name of parsed.positional) {
+        await client.branchDelete({ dir, name });
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("branch", cause);
+    }
+  }
+
+  if (parsed.positional.length === 0) {
+    // List mode. Mark the current branch with a leading '* '
+    // the way real git does so a consumer can grep for it.
+    try {
+      const [branches, current] = await Promise.all([
+        client.branchList({ dir }),
+        client.currentBranch({ dir }),
+      ]);
+      if (branches.length === 0) return { stdout: "", stderr: "", exitCode: 0 };
+      const lines = branches
+        .slice()
+        .sort()
+        .map((b) => (b === current ? `* ${b}` : `  ${b}`));
+      return { stdout: `${lines.join("\n")}\n`, stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("branch", cause);
+    }
+  }
+
+  if (parsed.positional.length > 2) {
+    return {
+      stdout: "",
+      stderr: `git branch: unexpected argument '${parsed.positional[2]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const [name, startPoint] = parsed.positional;
+  try {
+    await client.branch({
+      dir,
+      name,
+      startPoint,
+      force: parsed.flags.force === true,
+    });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("branch", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// tag
+// ---------------------------------------------------------------
+
+async function runTag(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git tag` modes mirror branch: bare = list, <name> = create,
+  // -d <name> = delete.
+  const parsed = parseFlags(args, {
+    d: { kind: "bool" },
+    delete: { kind: "bool" },
+    force: { kind: "bool", alias: ["f"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git tag: ${parsed.error}\n`, exitCode: 129 };
+  }
+  const wantDelete = parsed.flags.d === true || parsed.flags.delete === true;
+  const dir = resolveDir(undefined, input.cwd);
+
+  if (wantDelete) {
+    if (parsed.positional.length === 0) {
+      return {
+        stdout: "",
+        stderr: "git tag: -d requires a tag name\n",
+        exitCode: 129,
+      };
+    }
+    try {
+      for (const name of parsed.positional) {
+        await client.tagDelete({ dir, name });
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    } catch (cause) {
+      return mapGitError("tag", cause);
+    }
+  }
+
+  if (parsed.positional.length === 0) {
+    try {
+      const tags = await client.tagList({ dir });
+      if (tags.length === 0) return { stdout: "", stderr: "", exitCode: 0 };
+      return {
+        stdout: `${tags.slice().sort().join("\n")}\n`,
+        stderr: "",
+        exitCode: 0,
+      };
+    } catch (cause) {
+      return mapGitError("tag", cause);
+    }
+  }
+
+  if (parsed.positional.length > 2) {
+    return {
+      stdout: "",
+      stderr: `git tag: unexpected argument '${parsed.positional[2]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const [name, object] = parsed.positional;
+  try {
+    await client.tag({ dir, name, object, force: parsed.flags.force === true });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("tag", cause);
+  }
+}
+
+// ---------------------------------------------------------------
+// checkout
+// ---------------------------------------------------------------
+
+async function runCheckout(
+  client: GitClient,
+  args: string[],
+  input: GitCliInput,
+): Promise<GitCliResult> {
+  // `git checkout <ref> [-- <paths>...]`. The -b shortcut for
+  // create-and-switch isn't covered here; agents who want it
+  // chain `branch <name> && checkout <name>` themselves.
+  const parsed = parseFlags(args, {
+    force: { kind: "bool", alias: ["f"] },
+  });
+  if ("error" in parsed) {
+    return { stdout: "", stderr: `git checkout: ${parsed.error}\n`, exitCode: 129 };
+  }
+  const sep = args.indexOf("--");
+  const refArgs =
+    sep === -1 ? parsed.positional : args.slice(0, sep).filter((a) => !a.startsWith("-"));
+  const pathArgs = sep === -1 ? [] : args.slice(sep + 1);
+  if (refArgs.length === 0) {
+    return { stdout: "", stderr: "git checkout: missing <ref>\n", exitCode: 129 };
+  }
+  if (refArgs.length > 1) {
+    return {
+      stdout: "",
+      stderr: `git checkout: unexpected argument '${refArgs[1]}'\n`,
+      exitCode: 129,
+    };
+  }
+  const dir = resolveDir(undefined, input.cwd);
+  try {
+    await client.checkout({
+      dir,
+      ref: refArgs[0],
+      paths: pathArgs.length > 0 ? pathArgs : undefined,
+      force: parsed.flags.force === true,
+    });
+    return { stdout: "", stderr: "", exitCode: 0 };
+  } catch (cause) {
+    return mapGitError("checkout", cause);
   }
 }
 

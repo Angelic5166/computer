@@ -57,6 +57,23 @@ import {
   type TreeEntryView,
 } from "./reads.js";
 import {
+  branchDeleteWith,
+  branchListWith,
+  branchWith,
+  checkoutWith,
+  type GitBranchDeleteOptions,
+  type GitBranchListOptions,
+  type GitBranchOptions,
+  type GitCheckoutOptions,
+  type GitTagDeleteOptions,
+  type GitTagListOptions,
+  type GitTagOptions,
+  type IsomorphicGitRefsClient,
+  tagDeleteWith,
+  tagListWith,
+  tagWith,
+} from "./refs.js";
+import {
   addWith,
   type GitAddOptions,
   type GitRmOptions,
@@ -94,6 +111,15 @@ export type {
   GitShowOptions,
   TreeEntryView,
 } from "./reads.js";
+export type {
+  GitBranchDeleteOptions,
+  GitBranchListOptions,
+  GitBranchOptions,
+  GitCheckoutOptions,
+  GitTagDeleteOptions,
+  GitTagListOptions,
+  GitTagOptions,
+} from "./refs.js";
 export type { GitAddOptions, GitRmOptions } from "./staging.js";
 export type { GitStatusOptions, StatusEntry } from "./status.js";
 
@@ -141,6 +167,20 @@ export interface GitClient {
   lsFiles(options?: GitLsFilesOptions): Promise<string[]>;
   /** List one level of a tree (or sub-tree). */
   lsTree(options: GitLsTreeOptions): Promise<TreeEntryView[]>;
+  /** Create a branch. */
+  branch(options: GitBranchOptions): Promise<void>;
+  /** Delete a branch. */
+  branchDelete(options: GitBranchDeleteOptions): Promise<void>;
+  /** List local branches. */
+  branchList(options?: GitBranchListOptions): Promise<string[]>;
+  /** Create a lightweight tag. */
+  tag(options: GitTagOptions): Promise<void>;
+  /** Delete a tag. */
+  tagDelete(options: GitTagDeleteOptions): Promise<void>;
+  /** List tags. */
+  tagList(options?: GitTagListOptions): Promise<string[]>;
+  /** Move HEAD to a ref, or update working-tree paths to a ref. */
+  checkout(options: GitCheckoutOptions): Promise<void>;
   /**
    * Argv-driven entry point. The worker-backend's `git` custom
    * command dispatches through this; in-process callers can use
@@ -323,6 +363,56 @@ export function createGitClient({
         ...options,
         fs: await fs(),
         git: await loadGit<IsomorphicGitReadsClient>(),
+        cache,
+      });
+    },
+    async branch(options) {
+      return branchWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
+      });
+    },
+    async branchDelete(options) {
+      return branchDeleteWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
+      });
+    },
+    async branchList(options = {}) {
+      return branchListWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
+      });
+    },
+    async tag(options) {
+      return tagWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
+      });
+    },
+    async tagDelete(options) {
+      return tagDeleteWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
+      });
+    },
+    async tagList(options = {}) {
+      return tagListWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
+      });
+    },
+    async checkout(options) {
+      return checkoutWith({
+        ...options,
+        fs: await fs(),
+        git: await loadGit<IsomorphicGitRefsClient>(),
         cache,
       });
     },
