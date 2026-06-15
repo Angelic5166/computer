@@ -130,7 +130,7 @@ jobs:
           chmod +x packages/workspace/dist/bin/wsd-linux-x64
 
       - name: Sync versions
-        run: node scripts/set-versions.mjs "${RELEASE_TAG}"
+        run: node script/set-versions.mjs "${RELEASE_TAG}"
 
       # Pick the npm dist-tag and decide whether this release moves
       # the `:latest` pointers. A stable semver (no `-` suffix)

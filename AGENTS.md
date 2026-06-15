@@ -72,15 +72,11 @@ and [`.agents/skills/pull-requests/SKILL.md`](.agents/skills/pull-requests/SKILL
 Two top-level directories hold helper scripts. They're outside the
 workspace package set on purpose — they're tooling, not shipped code.
 
-[`scripts/`](scripts/) holds repo-maintenance scripts run from npm:
+[`script/`](script/) holds maintainance scripts and operator-facing harnesses for `wsd` and the sync
+loop. Reach for these when you're chasing a behavior the unit tests don't cover.
 
 - `set-versions.mjs` syncs the version of every published package in
   lockstep. Invoked from the release pipeline.
-
-[`script/`](script/) holds operator-facing harnesses for `wsd` and
-the sync loop. Reach for these when you're chasing a behavior the
-unit tests don't cover.
-
 - `shell` boots a debian-slim container with the linux `wsd` binary
   mounted under `/usr/local/bin`. The starting point for anything
   that needs a real FUSE mount.

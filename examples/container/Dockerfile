@@ -4,7 +4,7 @@
 # a single layer over `scratch` whose only contents are the SEA
 # binary at /usr/local/bin/wsd; we COPY it into a slim debian
 # runtime below. The :VERSION tag is rewritten in lockstep with
-# the rest of the monorepo by scripts/set-versions.mjs.
+# the rest of the monorepo by script/set-versions.mjs.
 #
 # wsd mounts a FUSE filesystem at MOUNT_POINT so exec'd commands
 # see the same VFS the RPC surface reads and writes. With

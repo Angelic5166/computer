@@ -2,7 +2,7 @@
 # examples/container — we pull a wsd binary out of the public
 # GHCR image, drop it into a slim debian, and run it as PID 1.
 # The :VERSION tag is rewritten in lockstep with the rest of the
-# monorepo by scripts/set-versions.mjs.
+# monorepo by script/set-versions.mjs.
 #
 # wsd mounts a FUSE filesystem at MOUNT_POINT so exec'd commands
 # (git, npm, vitest, …) see the same files the Workspace RPC

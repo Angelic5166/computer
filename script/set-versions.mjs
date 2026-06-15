@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Sync the version of every published package in lockstep.
 // Usage:
-//   node scripts/set-versions.mjs 0.1.0-alpha.2
-//   node scripts/set-versions.mjs v0.1.0-alpha.2   # leading 'v' tolerated
+//   node script/set-versions.mjs 0.1.0-alpha.2
+//   node script/set-versions.mjs v0.1.0-alpha.2   # leading 'v' tolerated
 //
 // Both @cloudflare/workspace and @cloudflare/workspace-wsd-linux-x64
 // land at the same release tag. The release workflow runs this with
