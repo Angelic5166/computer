@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/workspace",
-  "version": "0.0.0-alpha.7",
+  "version": "0.0.0-alpha.8",
   "description": "Cloudflare Workspace — a SQLite-backed virtual filesystem with sync to a container-side daemon (wsd).",
   "license": "MIT",
   "repository": {
