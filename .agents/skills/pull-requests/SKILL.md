@@ -17,7 +17,9 @@ Use this skill any time you are tasked with creating a pull request on GitHub. T
 
 A good pull request tells the story of the change and is intended to add color and context that is not or cannot be conveyed in the source code.
 
-It should aim to be concise and use paragraphs and prose where possible rather than bullet points to improve readability.
+It should aim to be concise and use paragraphs and prose where appropriate rather than bullet points to improve readability and tell the story. Bullet points can be used for lists when semantically appropriate.
+
+Code examples and diagrams (using mermaid) are preferred over prose to communicate your message.
 
 It should use the following structure and include a paragraph on each topic.
 
@@ -119,6 +121,10 @@ Format the pull request using Github flavored markdown, do not use hard line bre
 ## Verification
 
 After completing any pull request description:
+
+Review the content and ask "can this be shorter?". Then make it shorter. Do this twice. Use code blocks and diagrams where appropriate to simplify prose.
+
+Finally, ensure the folowing requirements are met:
 
  - [ ] Code braces are used to wrap code e.g. `req.fetch()` or `MyClass`.
  - [ ] There are no heading elements in the document.
