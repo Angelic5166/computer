@@ -34,8 +34,8 @@ client ─► Worker /c/<name>/{file,exec}
    `@cloudflare/workspace/backends/worker`, passing the Loader
    binding, a `{binding, id}` reference to itself, and `ctx`.
    The backend handles the rest internally: it builds the Loader
-   callback (with the bundled shell module + the seek-bzip stub),
-   mints a `WorkspaceServiceProxy` loopback through
+   callback (with the code-split shell modules + the seek-bzip
+   stub), mints a `WorkspaceServiceProxy` loopback through
    `ctx.exports.WorkspaceServiceProxy(...)`, calls
    `env.LOADER.get(...).getEntrypoint("ShellWorker")`, and turns
    the resulting Fetcher into a `ShellRPC`.
@@ -101,10 +101,14 @@ POST /c/<name>/exec                    { command | argv, cwd?, encoding? }
 
 ## Run it locally
 
-No Docker, no extra build step. The shell ships as a pre-bundled
-module string inside `@cloudflare/workspace/backends/worker`;
-`WorkerBackend` hands it to the Loader callback internally so the
-DO constructor stays a three-line backend invocation.
+No Docker, no extra build step. The shell ships as a record of
+pre-bundled modules (`SHELL_MODULES`) inside
+`@cloudflare/workspace/backends/worker`; `WorkerBackend` spreads
+the whole record into the Loader callback internally so the DO
+constructor stays a three-line backend invocation. The entry
+module parses on cold start; the dynamic chunks (python, js-exec,
+sqlite, curl, html-to-markdown) stay cold until a script reaches
+for them.
 
 ```sh
 npm run dev --workspace @example/workspace-worker

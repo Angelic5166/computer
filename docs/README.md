@@ -43,7 +43,7 @@ The package ships several entrypoints:
 | --- | --- |
 | `@cloudflare/workspace` | The Workspace facade, stub types, the R2 mount, and proxy classes. |
 | `@cloudflare/workspace/backends/container` | `CloudflareContainerBackend` and `withWorkspaceContainer`. Pulls in the wsd / capnweb sync plumbing. |
-| `@cloudflare/workspace/backends/worker` | `WorkerBackend` and the bundled just-bash shell. Pulls in the ~3 MB module bundle the Dynamic Worker loads. |
+| `@cloudflare/workspace/backends/worker` | `WorkerBackend` and the bundled just-bash shell. The shell ships as a record of code-split modules the Dynamic Worker loads on demand: a ~290 KB entry parsed on cold start, plus ~2.5 MB of chunks that stay cold until a script reaches for them. |
 | `@cloudflare/workspace/git` | Isomorphic-git glue for working with checkouts inside the workspace. |
 
 A consumer that only uses the container backend never imports the
