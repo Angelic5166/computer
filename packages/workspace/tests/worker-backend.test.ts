@@ -26,7 +26,8 @@
 //     │                      │                          │   land in the same DO)
 //
 // Every layer is real: the workerd runtime, the Worker Loader
-// binding, the bundled SHELL_BUNDLE, the just-bash interpreter,
+// binding, the SHELL_MODULES code-split bundle, the just-bash
+// interpreter,
 // the WorkspaceServiceProxy loopback, the DO ↔ stub Workers RPC
 // boundary. A passing run proves the wiring actually holds
 // together end to end, not just that the fakes line up.
@@ -79,8 +80,10 @@ async function exec(
 
 describe("WorkerBackend end-to-end", () => {
   // Per-test timeouts come from vitest.config.worker-backend.ts's
-  // testTimeout: 60_000 — the Worker Loader cold start + ~3 MB
-  // SHELL_BUNDLE parse + just-bash boot dominates the runtime.
+  // testTimeout: 60_000 — the Worker Loader cold start + the
+  // shell.js parse + just-bash boot dominates the runtime.
+  // SHELL_MODULES code-splits the bundle so only the ~290 KB
+  // entry parses on cold start; dynamic chunks load on demand.
   // The actual fs RPC is sub-millisecond; the budget is for the
   // isolate.
 

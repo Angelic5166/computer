@@ -17,9 +17,10 @@ export default defineConfig({
   test: {
     globals: true,
     include: ["tests/worker-backend.test.ts"],
-    // The bundled SHELL_BUNDLE is ~3 MB and the Worker Loader
-    // boot is dominated by parsing and isolate startup. A 60s
-    // top-level cap gives each case its own per-it timeout
+    // SHELL_MODULES splits the bundle so workerd only parses
+    // shell.js (~290 KB) on cold start; dynamic chunks load on
+    // demand. Boot is still dominated by isolate startup, so a
+    // 60s top-level cap gives each case its own per-it timeout
     // headroom without dragging the whole run.
     testTimeout: 60_000,
   },

@@ -39,7 +39,7 @@ export default { decode };
 //   env.LOADER.get(loaderId, () => ({
 //     mainModule: "shell.js",
 //     modules: {
-//       "shell.js": SHELL_BUNDLE,
+//       ...SHELL_MODULES,
 //       ...SHELL_RUNTIME_MODULES,
 //     },
 //     ...

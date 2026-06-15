@@ -7,7 +7,7 @@
   //   - LOADER — the Worker Loader binding the backend hands to
   //     env.LOADER.get(...). Miniflare implements the loader; the
   //     loaded Worker is the bundled ShellWorker the workspace
-  //     package ships at SHELL_BUNDLE.
+  //     package ships at SHELL_MODULES (entry + code-split chunks).
   //
   // The default export is a thin WorkerEntrypoint that the test
   // driver pokes through SELF.fetch — it owns no logic, it just

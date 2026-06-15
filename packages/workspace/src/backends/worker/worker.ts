@@ -5,7 +5,7 @@
 // caller hands the backend a Loader binding plus a {binding, id}
 // reference to the host DO, and the backend takes care of the
 // rest. It builds the Worker Loader callback's modules table
-// (SHELL_BUNDLE plus the runtime stubs), wires a
+// (SHELL_MODULES plus the runtime stubs), wires a
 // WorkspaceServiceProxy loopback into the loaded Worker's env so
 // the shell can call env.HOST.getWorkspace() back into the host
 // DO, mints the Dynamic Worker stub through env.LOADER.get(...),
@@ -26,7 +26,7 @@ import type { ExecEvent, ShellRPC, SyncRPC, WorkspaceRPC } from "@cloudflare/wor
 
 import type { BackendHandle, WorkspaceBackend } from "../../backend.js";
 import type { WorkspaceServiceProxyProps } from "../../proxy.js";
-import { SHELL_BUNDLE } from "./generated-bundle.js";
+import { SHELL_MODULES } from "./generated-bundle.js";
 import { SHELL_RUNTIME_MODULES } from "./runtime-modules.js";
 
 // The shape the loaded ShellWorker exposes. The host-side
@@ -217,7 +217,7 @@ export class WorkerBackend implements WorkspaceBackend {
       compatibilityFlags,
       mainModule: "shell.js",
       modules: {
-        "shell.js": SHELL_BUNDLE,
+        ...SHELL_MODULES,
         ...SHELL_RUNTIME_MODULES,
       },
       env: {

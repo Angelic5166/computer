@@ -180,9 +180,10 @@ handle.
   `/c/<name>/file/...` and `/c/<name>/exec` routes the container
   example also exposes).
 - No Dockerfile, no build script. The shell bundle ships with
-  `@cloudflare/workspace/backends/worker` as
-  `SHELL_BUNDLE`; the backend hands it to the Loader callback
-  itself.
+  `@cloudflare/workspace/backends/worker` as `SHELL_MODULES`
+  (a record of module name → source covering the entry plus
+  every code-split chunk); the backend hands the whole record
+  to the Loader callback itself.
 
 The DO's backend wiring fits in three lines:
 
