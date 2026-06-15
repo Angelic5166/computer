@@ -16,7 +16,9 @@
       // staged into ./build/ by the predev / predeploy hook.
       "image": "./Dockerfile",
       "instance_type": "standard-2",
-      "max_instances": 5
+      "max_instances": 5,
+      "rollout_active_grace_period": 0,
+      "rollout_step_percentage": [100]
     }
   ],
 
