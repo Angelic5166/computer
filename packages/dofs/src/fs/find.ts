@@ -25,7 +25,10 @@ export function find(db: Database, directory: string, pattern?: string): Workspa
   }
 
   const out: WorkspaceFoundEntry[] = [];
-  const regex = pattern !== undefined ? compileGlob(pattern) : undefined;
+  // An empty pattern is equivalent to no pattern: walk and return
+  // everything rather than compiling it into `^$`, which would match
+  // only empty relative paths and yield no results.
+  const regex = pattern ? compileGlob(pattern) : undefined;
 
   walk(db, node.inode, canonical, out);
 

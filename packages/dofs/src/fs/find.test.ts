@@ -27,6 +27,21 @@ describe("find", () => {
     });
   });
 
+  it("treats an empty pattern like no pattern and returns every entry", async () => {
+    await withDB(async (db) => {
+      mkdir(db, "/a/b", { recursive: true }, () => 0);
+      await writeFile(db, "/a/x.ts", "", {}, () => 0);
+      await writeFile(db, "/a/b/y.md", "", {}, () => 0);
+      const entries = find(db, "/", "").sort((p, q) => p.path.localeCompare(q.path));
+      expect(entries).toEqual([
+        { path: "/a", type: "dir" },
+        { path: "/a/b", type: "dir" },
+        { path: "/a/b/y.md", type: "file" },
+        { path: "/a/x.ts", type: "file" },
+      ]);
+    });
+  });
+
   it("matches a single-level glob *.ts within the directory only", async () => {
     await withDB(async (db) => {
       mkdir(db, "/a/b", { recursive: true }, () => 0);
