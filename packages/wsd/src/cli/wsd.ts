@@ -5,8 +5,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import type { Database } from "@cloudflare/dofs";
+import type { ExecEvent as RpcExecEvent } from "@cloudflare/workspace-rpc";
 import { createWorkspaceClient, type WorkspaceClient } from "@cloudflare/workspace-rpc/client";
 import { isStubTrackingEnabled, stubSnapshot } from "@cloudflare/workspace-rpc/debug";
+import type { RunnerLike } from "@cloudflare/workspace-rpc/server";
 import {
   acceptWebSocketSession,
   createWorkspaceServer,
@@ -14,6 +16,7 @@ import {
 } from "@cloudflare/workspace-rpc/server";
 import { WebSocket, WebSocketServer } from "ws";
 import { Runner } from "../exec/index.js";
+import type { ExecEvent as WsdExecEvent } from "../exec/types.js";
 import {
   createNodeVirtualFileSystem,
   type FUSEBackend,
@@ -97,6 +100,21 @@ function send(
 function requestPath(request: IncomingMessage): string {
   const url = new URL(request.url ?? "/", "http://localhost");
   return url.pathname;
+}
+
+// Strip heartbeat events from a Runner stream before it reaches the
+// RPC layer. Heartbeats are a local observability signal only; the
+// workspace-rpc wire contract carries only stdout, stderr, and exit.
+function dropHeartbeats(stream: ReadableStream<WsdExecEvent>): ReadableStream<RpcExecEvent> {
+  return stream.pipeThrough(
+    new TransformStream<WsdExecEvent, RpcExecEvent>({
+      transform(event, controller) {
+        if (event.name !== "heartbeat") {
+          controller.enqueue(event as RpcExecEvent);
+        }
+      },
+    }),
+  );
 }
 
 interface WSDInfo {
@@ -506,7 +524,22 @@ async function main(): Promise<void> {
     ...(fuse !== undefined ? { cwd: mountPoint } : {}),
     ...(logMaxBytesOverride !== undefined ? { logMaxBytes: logMaxBytesOverride } : {}),
   });
-  const rpc = createWorkspaceServer(db, runner, {
+  // Heartbeat events are wsd-local and must not cross the RPC boundary.
+  // Wrap the runner so every exec/get stream drops heartbeat events before
+  // they reach the wire. RunnerLike expects only stdout, stderr, and exit.
+  const rpcRunner: RunnerLike = {
+    exec(command, options) {
+      const handle = runner.exec(command, options);
+      return { id: handle.id, events: dropHeartbeats(handle.events) };
+    },
+    get(id, options) {
+      const handle = runner.get(id, options);
+      return { id: handle.id, events: dropHeartbeats(handle.events) };
+    },
+    kill: runner.kill.bind(runner),
+    dispose: runner.dispose.bind(runner),
+  };
+  const rpc = createWorkspaceServer(db, rpcRunner, {
     // Push handler awaits the shim flush before returning, so any
     // exec()/read against the host fs after a push sees the new
     // files. Real FUSE doesn't need this — the kernel-FUSE driver
@@ -525,7 +558,10 @@ async function main(): Promise<void> {
         }
       : {}),
   });
-  const http = createHTTPServer(info, rpc, () => collectDbStats(db));
+  const http = createHTTPServer(info, rpc, () => ({
+    ...collectDbStats(db),
+    ...(fuse?.getBufferStats?.() ?? {}),
+  }));
 
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
