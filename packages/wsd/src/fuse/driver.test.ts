@@ -999,3 +999,27 @@ test("FUSE getattr block count tracks buffered size before flush", async () => {
   expect(stat.errno).toBe(0);
   expect(stat.result).toMatchObject({ size: 2000, blksize: 4096, blocks: 4 });
 });
+
+test("xattr: getxattr for a VFS-backed file returns correct codes", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  // Create and flush a VFS-backed file.
+  const create = await callback((cb) => ops.create("/xattr-backed.txt", 0o644, cb));
+  expect(create.errno).toBe(0);
+  await status((cb) => ops.flush("/xattr-backed.txt", create.result as number, cb));
+  await status((cb) => ops.release("/xattr-backed.txt", create.result as number, cb));
+
+  // getxattr returns ENODATA (the file exists but has no xattrs).
+  expect(await status((cb) => ops.getxattr("/xattr-backed.txt", "user.x", 0, cb))).toBe(-61);
+  // setxattr returns 0 (the file exists; we accept but don't store).
+  expect(
+    await status((cb) => ops.setxattr("/xattr-backed.txt", "user.x", Buffer.from("v"), 0, 0, cb)),
+  ).toBe(0);
+  // listxattr returns an empty buffer.
+  const lx = await callback((cb) => ops.listxattr("/xattr-backed.txt", cb));
+  expect(lx.errno).toBe(0);
+  expect((lx.result as Buffer).length).toBe(0);
+  // removexattr returns ENODATA.
+  expect(await status((cb) => ops.removexattr("/xattr-backed.txt", "user.x", cb))).toBe(-61);
+});

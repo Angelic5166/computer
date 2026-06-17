@@ -130,6 +130,10 @@ export interface FuseBufferStats {
 
 export interface FuseMount {
   unmount(): Promise<void>;
+  // Returns the in-memory buffer and cache stats for the mounted
+  // filesystem. Only present when the mount was created via mountFuse;
+  // the shim does not expose this.
+  getBufferStats?: () => FuseBufferStats;
 }
 
 interface FuseNativeInstance {
@@ -889,19 +893,19 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     mknod: notImplemented("mknod"),
 
     setxattr(path, _name, _value, _position, _flags, cb) {
-      cb(vfs.existsSync(toVfs(path)) ? 0 : ERRNO.ENOENT);
+      cb(exists(path) ? 0 : ERRNO.ENOENT);
     },
 
     getxattr(path, _name, _position, cb) {
-      cb(vfs.existsSync(toVfs(path)) ? ERRNO.ENODATA : ERRNO.ENOENT);
+      cb(exists(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
 
     listxattr(path, cb) {
-      cb(vfs.existsSync(toVfs(path)) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
+      cb(exists(path) ? 0 : ERRNO.ENOENT, Buffer.alloc(0));
     },
 
     removexattr(path, _name, cb) {
-      cb(vfs.existsSync(toVfs(path)) ? ERRNO.ENODATA : ERRNO.ENOENT);
+      cb(exists(path) ? ERRNO.ENODATA : ERRNO.ENOENT);
     },
 
     link(source, destination, cb) {
@@ -1036,6 +1040,7 @@ export async function mountFuse(options: {
         });
       });
     },
+    getBufferStats: _getBufferStats,
   };
 }
 
