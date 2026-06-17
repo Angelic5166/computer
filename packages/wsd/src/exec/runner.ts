@@ -29,11 +29,13 @@ interface ExecRecord {
   child: ChildProcess;
   log: EventLog;
   startedAt: number;
+  lastOutputAt?: number;
   exitedAt?: number;
   live: boolean;
   subscriber?: LiveSubscriber;
   timeoutTimer?: NodeJS.Timeout;
   killTimer?: NodeJS.Timeout;
+  heartbeatTimer?: NodeJS.Timeout;
 }
 
 interface LiveSubscriber {
@@ -76,6 +78,7 @@ export class Runner {
     retentionMs: number;
     sweepIntervalMs: number;
     defaultTimeoutMs: number;
+    heartbeatIntervalMs: number;
     now: () => number;
   };
   private readonly records = new Map<string, ExecRecord>();
@@ -91,6 +94,7 @@ export class Runner {
       retentionMs: init.retentionMs ?? DEFAULTS.retentionMs,
       sweepIntervalMs: init.sweepIntervalMs ?? DEFAULTS.sweepIntervalMs,
       defaultTimeoutMs: init.defaultTimeoutMs ?? DEFAULTS.defaultTimeoutMs,
+      heartbeatIntervalMs: init.heartbeatIntervalMs ?? 0,
       now: init.now ?? Date.now,
     };
     initializeExecSchema(this.db);
@@ -158,10 +162,34 @@ export class Runner {
     const onData = (name: "stdout" | "stderr") => (chunk: Buffer) => {
       const value = new Uint8Array(chunk);
       const seq = log.append(name, value);
+      record.lastOutputAt = this.opts.now();
       record.subscriber?.enqueue({ id, seq, name, value });
     };
     child.stdout?.on("data", onData("stdout"));
     child.stderr?.on("data", onData("stderr"));
+
+    if (this.opts.heartbeatIntervalMs > 0) {
+      const scheduleHeartbeat = (): void => {
+        record.heartbeatTimer = setTimeout(() => {
+          if (!record.live) return;
+          const now = this.opts.now();
+          const elapsedMs = now - record.startedAt;
+          const lastOutputMs =
+            record.lastOutputAt !== undefined ? now - record.lastOutputAt : elapsedMs;
+          const pid = child.pid ?? 0;
+          const seq = log.allocSeq();
+          record.subscriber?.enqueue({
+            id,
+            seq,
+            name: "heartbeat",
+            value: { pid, elapsedMs, lastOutputMs },
+          });
+          scheduleHeartbeat();
+        }, this.opts.heartbeatIntervalMs);
+        record.heartbeatTimer.unref?.();
+      };
+      scheduleHeartbeat();
+    }
 
     const finalise = (code: number | null, signal: NodeJS.Signals | null): void => {
       if (!record.live) return;
@@ -174,6 +202,10 @@ export class Runner {
       if (record.killTimer !== undefined) {
         clearTimeout(record.killTimer);
         record.killTimer = undefined;
+      }
+      if (record.heartbeatTimer !== undefined) {
+        clearTimeout(record.heartbeatTimer);
+        record.heartbeatTimer = undefined;
       }
       const exitCode = mapExitCode(code, signal);
       let seq: number;
@@ -388,6 +420,10 @@ export class Runner {
     if (record.killTimer !== undefined) {
       clearTimeout(record.killTimer);
       record.killTimer = undefined;
+    }
+    if (record.heartbeatTimer !== undefined) {
+      clearTimeout(record.heartbeatTimer);
+      record.heartbeatTimer = undefined;
     }
     try {
       if (record.child.exitCode === null && record.child.signalCode === null) {

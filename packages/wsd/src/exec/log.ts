@@ -120,6 +120,13 @@ export class EventLog {
     return seq;
   }
 
+  // Advance the seq counter and return the next value without writing
+  // any row to the database. Used for events that the runner emits on
+  // the live stream but does not need to persist (heartbeats).
+  allocSeq(): number {
+    return this.nextSeq++;
+  }
+
   setExit(code: number): number {
     const meta = this.meta();
     if (meta === undefined) throw new Error(`log ${this.id}: setExit after dispose`);

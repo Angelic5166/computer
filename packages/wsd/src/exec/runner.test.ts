@@ -373,3 +373,79 @@ test("exec(cwd) quotes path segments with spaces and single quotes", async () =>
     dispose();
   }
 });
+
+test("runner emits heartbeat events at the configured interval", async () => {
+  // A command that sleeps long enough to produce at least two
+  // heartbeat ticks at a 50ms interval. We drain the stream, pick
+  // out the heartbeat events, and verify the shape rather than
+  // exact timing to stay deterministic under load.
+  const { runner, dispose } = fixture({ heartbeatIntervalMs: 50 });
+  try {
+    const handle = runner.exec("sleep 0.3", { id: "hb" });
+    const events = await drain(handle.events);
+
+    const heartbeats = events.filter((e) => e.name === "heartbeat");
+    expect(heartbeats.length >= 2).toBeTruthy();
+
+    const first = heartbeats[0] as {
+      id: string;
+      seq: number;
+      name: "heartbeat";
+      value: { pid: number; elapsedMs: number; lastOutputMs: number };
+    };
+    expect(typeof first.value.pid).toBe("number");
+    expect(first.value.pid > 0).toBeTruthy();
+    expect(typeof first.value.elapsedMs).toBe("number");
+    expect(first.value.elapsedMs >= 0).toBeTruthy();
+    expect(typeof first.value.lastOutputMs).toBe("number");
+  } finally {
+    dispose();
+  }
+});
+
+test("heartbeat events are not emitted when heartbeatIntervalMs is not set", async () => {
+  const { runner, dispose } = fixture();
+  try {
+    const handle = runner.exec("sleep 0.1", { id: "nohb" });
+    const events = await drain(handle.events);
+    const heartbeats = events.filter((e) => e.name === "heartbeat");
+    expect(heartbeats.length).toBe(0);
+  } finally {
+    dispose();
+  }
+});
+
+test("heartbeat elapsedMs grows monotonically across ticks", async () => {
+  const { runner, dispose } = fixture({ heartbeatIntervalMs: 40 });
+  try {
+    const handle = runner.exec("sleep 0.25", { id: "hbmono" });
+    const events = await drain(handle.events);
+
+    const heartbeats = events.filter((e) => e.name === "heartbeat") as Array<{
+      id: string;
+      seq: number;
+      name: "heartbeat";
+      value: { pid: number; elapsedMs: number; lastOutputMs: number };
+    }>;
+    expect(heartbeats.length >= 2).toBeTruthy();
+    for (let i = 1; i < heartbeats.length; i++) {
+      expect(heartbeats[i].value.elapsedMs >= heartbeats[i - 1].value.elapsedMs).toBeTruthy();
+    }
+  } finally {
+    dispose();
+  }
+});
+
+test("heartbeat seq is monotonically increasing with other events", async () => {
+  const { runner, dispose } = fixture({ heartbeatIntervalMs: 30 });
+  try {
+    const handle = runner.exec("sleep 0.15 && echo hi", { id: "hbseq" });
+    const events = await drain(handle.events);
+    const seqs = events.map((e) => e.seq);
+    for (let i = 1; i < seqs.length; i++) {
+      expect(seqs[i] > seqs[i - 1]).toBeTruthy();
+    }
+  } finally {
+    dispose();
+  }
+});

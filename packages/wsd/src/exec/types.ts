@@ -7,10 +7,21 @@
 // counter rather than a wall-clock timestamp avoids clock-skew
 // and same-millisecond ordering issues.
 
+export type HeartbeatValue = {
+  // OS process id of the running child.
+  pid: number;
+  // Milliseconds since the exec started.
+  elapsedMs: number;
+  // Milliseconds since the last stdout or stderr chunk arrived.
+  // Equal to elapsedMs when no output has been produced yet.
+  lastOutputMs: number;
+};
+
 export type ExecEvent =
   | { id: string; seq: number; name: "stdout"; value: Uint8Array }
   | { id: string; seq: number; name: "stderr"; value: Uint8Array }
-  | { id: string; seq: number; name: "exit"; value: number };
+  | { id: string; seq: number; name: "exit"; value: number }
+  | { id: string; seq: number; name: "heartbeat"; value: HeartbeatValue };
 
 export interface ExecOptions {
   // Caller-supplied id. If omitted the runner mints one. Reusing
@@ -46,6 +57,9 @@ export interface RunnerOptions {
   // Default exec timeout (ms). Per-call timeoutMs overrides this.
   // 0 disables the default; omit to use the built-in 320_000.
   defaultTimeoutMs?: number;
+  // Emit a heartbeat event every this many milliseconds while a child
+  // process is alive. When unset or zero, no heartbeat events are emitted.
+  heartbeatIntervalMs?: number;
   // Test seam: replaces Date.now() for retention math and log ts.
   now?: () => number;
 }
