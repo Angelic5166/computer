@@ -207,7 +207,110 @@ edited file) shows up exactly once on the wire. See
   the local SQLite store, which the DO runtime already serialises
   internally through its input gates.
 
+## Conflict semantics
+
+A *conflict* arises when two writers both mutate the same path without
+seeing each other's change first. Understanding where conflicts can and
+cannot happen in `@cloudflare/workspace` is essential before reasoning
+about the guarantees the system provides.
+
+### Within a single Workspace instance (DO)
+
+All mutations on a single `Workspace` instance (a single DO
+incarnation) are serialised by the DO runtime's input gates. Two
+concurrent calls to `ws.fs.writeFile` on the same path queue against
+the same SQLite store and resolve in order. There is no write-write
+conflict possible within one DO instance — the last call to land in
+the input gate wins and that is the authoritative state.
+
+The per-`Workspace` tail-promise FIFO adds a second layer of
+serialisation for `push()` and `pull()`: a concurrent pair of callers
+that both trigger sync operations will queue at the FIFO before either
+enters `pushOnce` / `pullOnce`. `shell.exec()` participates in the
+same FIFO automatically.
+
+### Across two containers sharing one Workspace
+
+This is where conflicts can occur. If two containers (two separate
+`wsd` mounts or two separate `WorkspaceBackend` instances) are wired
+to the same DO and both write to the same path, the outcome depends
+entirely on sync order:
+
+1. The sync protocol always **pulls remote changes before pushing
+   local ones** (`tick()` = pull then push). This prevents a writer
+   from clobbering the remote state with a stale local copy — it first
+   absorbs whatever the remote already has.
+2. However, **the pull does not detect that a path changed both
+   locally and remotely since the last sync**. When two containers
+   edit the same file concurrently, whichever container's push arrives
+   at the DO *last* wins. The earlier writer's change is silently
+   overwritten on the next sync. There is no merge, no error, and no
+   indication to either caller that a conflict occurred.
+3. Object-level integrity is preserved: the DO never holds a
+   partially-applied write. But content-level integrity is *not*
+   guaranteed — the surviving content is simply the last batch that
+   was applied.
+
+This is **last-write-wins at the sync granularity**. It is the same
+semantics as a shared NFS mount without locking, or an S3 bucket
+without conditional PUTs.
+
+### When last-write-wins is safe enough
+
+For the common agent patterns this is usually fine:
+
+- **One agent, one container, one DO.** No concurrent writers. Sync
+  is effectively a durability mechanism, not a concurrency mechanism.
+  This is the vast majority of current usage.
+- **Multiple agents, disjoint path ownership.** If agent A always
+  writes under `/workspace/a/` and agent B always writes under
+  `/workspace/b/`, their writes never overlap. Conflicts are
+  structurally impossible regardless of sync order.
+- **One writer, multiple readers.** Multiple consumers pulling from
+  the same DO but only one pushing. Conflict-free by construction.
+- **Write-once files.** Config files, initial scaffolding, or
+  generated artefacts that are written once and then only read.
+  Once the file lands in the DO it is stable; sync order is
+  irrelevant.
+
+### When last-write-wins is not safe enough
+
+Patterns that can lose data today:
+
+- **Multiple agents writing to shared files.** A shared `PLAN.md`, a
+  shared `state.json`, a shared log — any file that two containers
+  update independently will converge to whichever version synced
+  last, silently discarding the other.
+- **Read-modify-write cycles across containers.** If container A
+  reads `counter.txt` as `5`, increments to `6`, and writes it back,
+  while container B also read `5`, incremented to `6`, and writes it
+  back, the DO ends up with `6` from one of them, not `7`. Neither
+  write errored.
+- **Agent handoffs without an explicit sync point.** If agent A
+  finishes work and agent B immediately picks up the same workspace,
+  B needs to call `workspace.pull()` explicitly before reading to
+  ensure it sees A's final writes — there is no automatic fence.
+
+### Practical guidance today
+
+Given the current guarantees, the safest patterns are:
+
+1. **One active writer per workspace at a time.** If you have multiple
+   agents, coordinate via explicit handoffs at the application level
+   (e.g. agent A calls `workspace.pull()` at the end of its turn;
+   agent B calls `workspace.pull()` before starting its turn).
+2. **Partition the namespace.** Give each agent a dedicated subtree.
+   Shared state lives in the DO via its own RPC surface, not as a
+   shared workspace file.
+3. **Treat workspace files as agent-local scratch, not shared
+   mutable state.** The workspace is good at durable per-agent
+   storage. It is not (yet) a shared CRDT.
+
+See [Future considerations](#future-considerations) for the planned
+first-class conflict primitives.
+
 ## Ignore lists
+
 
 The `ignore` option hides path segments from the pull. Excluded
 paths are still written and read inside the container — the bytes just
