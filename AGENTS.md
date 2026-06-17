@@ -148,6 +148,11 @@ loop. Reach for these when you're chasing a behavior the unit tests don't cover.
   tasks against the mount with a tmpfs baseline for comparison.
 - `exec-tests` boots `wsd` in docker with FUSE disabled and exercises
   a few `shell.exec` scenarios.
+- `npm-bench.sh` / `run-npm-bench.sh` benchmark npm package installs
+  on native disk vs the FUSE mount. `run-npm-bench.sh` is the
+  user-facing entry point that boots a privileged Docker container;
+  `npm-bench.sh` runs inside it. Set `SCENARIOS`, `REPS`, `WARMUP`,
+  and `OUTPUT_JSON` to control what runs and where results land.
 
 When you add a script, drop a one-line description at the top of the
 file and add it to the list above.
