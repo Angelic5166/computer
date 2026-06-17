@@ -1,4 +1,5 @@
 import {
+  type ChangeCursor,
   type ChangeEntry,
   currentRev,
   Database,
@@ -58,7 +59,7 @@ async function drainStream<T>(stream: ReadableStream<T>): Promise<T[]> {
 // applyChanges to throw on a missing object mid-stream).
 function trackFetchDisposal(
   rpc: SyncRPC,
-  opts: { lowerCursor?: boolean; failHasObjects?: boolean } = {},
+  opts: { appliedPushCursor?: ChangeCursor; failHasObjects?: boolean } = {},
 ): { rpc: SyncRPC; disposeCount: () => number } {
   let disposeCount = 0;
   const wrapped = new Proxy(rpc as object, {
@@ -68,7 +69,9 @@ function trackFetchDisposal(
           const real = await Reflect.get(target, prop, receiver).call(target, ...args);
           return {
             ...real,
-            ...(opts.lowerCursor ? { appliedPushCursor: { rev: 0, path: null } } : {}),
+            ...(opts.appliedPushCursor !== undefined
+              ? { appliedPushCursor: opts.appliedPushCursor }
+              : {}),
             [Symbol.dispose]() {
               disposeCount += 1;
             },
@@ -460,13 +463,17 @@ describe("sync driver — pullOnce envelope disposal", () => {
       const local = new Database(new SQLiteTestStorage());
       initializeSchema(local, () => 1000);
       // Local claims to have pushed rev 42; the wrapper echoes back a
-      // rev-0 cursor, so assertAppliedPushCursor throws before the
-      // stream is ever read.
+      // same-rev partial cursor (rev 42 but stalled mid-apply at a
+      // path). That is a non-recoverable divergence — the inline
+      // reset path only catches a rev regression — so
+      // assertAppliedPushCursor throws before the stream is read.
       writeWatermark(local, "pushRev", 42);
       const providerR = new SQLiteWorkspaceProvider(remote.db, { now: () => 1 });
       providerR.writeFileSync("/seed.txt", "x");
 
-      const tracked = trackFetchDisposal(remote.rpc, { lowerCursor: true });
+      const tracked = trackFetchDisposal(remote.rpc, {
+        appliedPushCursor: { rev: 42, path: "/partial.txt" },
+      });
       await expect(pullOnce(local, tracked.rpc)).rejects.toThrow(/cross-side invariant violated/i);
       expect(tracked.disposeCount()).toBe(1);
     } finally {

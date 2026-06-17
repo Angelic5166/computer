@@ -107,10 +107,10 @@ async function pullOnceImpl(
   try {
     const { currentCursor, appliedPushCursor } = fetchResult;
     // Cross-side watermark divergence. Two shapes are recoverable:
-    //   * appliedPushCursor < {rev: localPushRev, path: null}: the
-    //     remote forgot what we pushed (typically a process-lifetime
-    //     wsd restart while the WebSocket survived, so
-    //     reconcileWatermarks on connect never re-ran).
+    //   * appliedPushCursor.rev < localPushRev: the remote forgot
+    //     what we pushed (typically a process-lifetime wsd restart
+    //     while the WebSocket survived, so reconcileWatermarks on
+    //     connect never re-ran).
     //   * currentCursor < after: the remote's log is shorter than we
     //     remember — same root cause, different symptom.
     // Both are the inline equivalent of reconcileWatermarks: reset
@@ -119,10 +119,16 @@ async function pullOnceImpl(
     // re-ships everything incrementally and the receiver's
     // alreadyApplied() check absorbs the redundant work.
     //
+    // The divergence test is rev-only on purpose. A same-rev partial
+    // appliedPushCursor (the remote applied part of the rev we
+    // pushed, then tore down mid-apply) is not a recoverable race —
+    // it means the receiver lost state inside a rev it told us it
+    // had. Resetting and replaying cannot mend that, so we let the
+    // assertion below surface it instead of looping.
+    //
     // A second divergence after a reset is a real protocol break:
     // surface it via the assertion below rather than loop.
-    const pushDiverged =
-      compareChangeCursors(appliedPushCursor, { rev: localPushRev, path: null }) < 0;
+    const pushDiverged = appliedPushCursor.rev < localPushRev;
     const fetchDiverged = compareChangeCursors(currentCursor, after) < 0;
     if (!retried && (pushDiverged || fetchDiverged)) {
       // Cancel the stream before disposing the envelope. For a real
@@ -410,12 +416,12 @@ export async function reconcileWatermarks(
     fetchRevReset = true;
   }
 
-  // The remote's fetchRev is the largest senderRev it has applied
-  // from us — every push handler advances fetchRev to the incoming
-  // senderRev, and fetchChanges echoes that value back as
-  // appliedPushRev. If it's below our local pushRev, the remote has
-  // not seen what we claimed to ship; reset our pushRev so the next
-  // pushOnce re-baselines from rev 0.
+  // The remote's fetch cursor rev is the largest senderRev it has
+  // applied from us — every push handler advances the fetch cursor to
+  // the incoming senderRev, and fetchChanges echoes that cursor back
+  // as appliedPushCursor. If its rev is below our local pushRev, the
+  // remote has not seen what we claimed to ship; reset our pushRev so
+  // the next pushOnce re-baselines from rev 0.
   //
   // We deliberately do NOT compare against remoteWatermarks.pushRev:
   // that field is the remote's own *outbound* push progress and
@@ -423,7 +429,7 @@ export async function reconcileWatermarks(
   // (e.g. the container side of a DO↔container backend), which would
   // make every reconcile spuriously reset pushRev and force a full
   // re-push on every reconnect.
-  if (remoteWatermarks.fetchRev < localPushRev) {
+  if (remoteWatermarks.fetchCursor.rev < localPushRev) {
     writeWatermark(db, "pushRev", 0, backend);
     pushRevReset = true;
   }
