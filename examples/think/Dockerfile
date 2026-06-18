@@ -8,7 +8,7 @@
 # (git, npm, vitest, …) see the same files the Workspace RPC
 # surface reads and writes.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.10 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11 AS wsd
 
 FROM debian:stable-slim
 

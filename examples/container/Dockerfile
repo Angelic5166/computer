@@ -13,7 +13,7 @@
 # real FUSE backend mounts; `wrangler dev` doesn't, so wsd falls
 # back to the userspace shim transparently.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.10 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.11 AS wsd
 
 FROM debian:stable-slim
 
