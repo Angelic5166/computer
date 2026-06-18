@@ -11,7 +11,7 @@
 # fall back to the userspace shim in local development environments
 # that do not expose /dev/fuse.
 
-FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.7 AS wsd
+FROM ghcr.io/cloudflare/workspace-wsd-linux-x64:0.0.0-alpha.10 AS wsd
 
 FROM --platform=linux/amd64 node:22-trixie-slim
 

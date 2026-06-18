@@ -26,7 +26,11 @@ const PACKAGES = [
 // first FROM line. Bump it in lockstep with the npm version so a
 // `git clone && wrangler dev` against any release tag pulls the
 // matching wsd image.
-const DOCKERFILES = ["examples/think/Dockerfile", "examples/container/Dockerfile"];
+const DOCKERFILES = [
+  "examples/container/Dockerfile",
+  "examples/think/Dockerfile",
+  "examples/think-compare-runtimes/Dockerfile.workspace",
+];
 const WSD_IMAGE_TAG_RE = /(ghcr\.io\/cloudflare\/workspace-wsd-linux-x64:)[^\s]+/g;
 
 const raw = argv[2];
