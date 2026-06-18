@@ -118,11 +118,17 @@ export function createArtifact(binding: Artifacts, sessionId: string): ArtifactC
 
     async get(name) {
       const handle = await binding.get(scopedName(sessionId, name));
-      // The handle is itself an ArtifactsRepoInfo (ArtifactsRepo
-      // extends it). Project the data fields to a plain object so
-      // the live capability isn't leaked and the name comes back
-      // local.
-      return repoInfo(handle, name);
+      // The handle is a live Workers-RPC stub (ArtifactsRepo extends
+      // RpcTarget). The published `@cloudflare/workers-types` shape is
+      // wrong in both directions: it models the metadata as inherited
+      // `ArtifactsRepoInfo` properties (which the runtime stub does
+      // not expose — reading `handle.remote` yields an RpcPromise for
+      // a nonexistent method) and omits `info()` (which the runtime
+      // does have, returning the metadata by value). Reach `info()`
+      // through a typed view until the published types are corrected.
+      const view = handle as unknown as { info(): Promise<ArtifactsRepoInfo> };
+      const info = await view.info();
+      return repoInfo(info, name);
     },
 
     async list() {
@@ -198,7 +204,8 @@ export function createArtifact(binding: Artifacts, sessionId: string): ArtifactC
 /**
  * Project an `ArtifactsRepoInfo` (or the `ArtifactsRepo` handle,
  * which extends it) to a plain metadata object with the name in its
- * local form.
+ * local form. The caller resolves the live `info()` value first, so
+ * every field here is already a plain value.
  */
 function repoInfo(info: ArtifactsRepoInfo, localName: string): ArtifactsRepoInfo {
   return {

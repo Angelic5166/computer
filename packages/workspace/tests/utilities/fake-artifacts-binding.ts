@@ -198,6 +198,14 @@ class FakeRepoHandle implements ArtifactsRepo {
     this.remote = i.remote;
   }
 
+  // The real binding exposes metadata through `info()` (the handle is
+  // an RpcTarget whose data is not readable as stub properties), so
+  // mirror that accessor here. The client reads metadata through this
+  // method, not off the handle's fields.
+  async info(): Promise<ArtifactsRepoInfo> {
+    return { ...this.repo.info };
+  }
+
   async createToken(
     scope: ArtifactScope = "write",
     ttl = 86400,

@@ -68,6 +68,51 @@ describe("createArtifact", () => {
       expect(repo.name).toBe("starter");
       expect(repo.remote).toContain("sess1__starter.git");
     });
+
+    it("reads metadata through the handle's info() method", async () => {
+      // The real binding's handle is an RpcTarget: its metadata is not
+      // readable as stub properties (reading `handle.remote` yields an
+      // RpcPromise for a nonexistent method), only through `info()`,
+      // which returns the metadata by value. Model exactly that here:
+      // a handle that exposes info() but throws on any property read.
+      const metadata = {
+        id: "repo_1",
+        name: "sess1__starter",
+        description: null,
+        defaultBranch: "main",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        lastPushAt: null,
+        source: null,
+        readOnly: false,
+        remote: "https://acct.example.net/git/sess1__starter.git",
+      };
+      const handle = new Proxy(
+        { info: async () => ({ ...metadata }) },
+        {
+          get(target, prop) {
+            if (prop === "info") return target.info;
+            // `await` probes `then`; let non-string/thenable reads
+            // through as undefined so the handle resolves normally.
+            if (typeof prop !== "string" || prop === "then") return undefined;
+            // Any metadata-field read is a bug: the client must go
+            // through info(), not touch the stub's properties.
+            throw new Error(`unexpected property read on handle: ${String(prop)}`);
+          },
+        },
+      );
+      const stubLikeBinding = {
+        async get(_scoped: string) {
+          return handle;
+        },
+      } as unknown as ConstructorParameters<typeof createArtifact>[0];
+
+      const client = createArtifact(stubLikeBinding, "sess1");
+      const repo = await client.get("starter");
+      expect(repo.name).toBe("starter");
+      expect(repo.remote).toBe("https://acct.example.net/git/sess1__starter.git");
+      expect(repo.defaultBranch).toBe("main");
+    });
   });
 
   describe("list", () => {

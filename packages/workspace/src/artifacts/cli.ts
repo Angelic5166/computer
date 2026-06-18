@@ -75,6 +75,8 @@ export async function runArtifactsCLI(
       return ok(topLevelHelp());
     case "create":
       return await runCreate(client, rest, input.remoteAdd);
+    case "share":
+      return await runShare(client, rest);
     case "repo":
       return await runRepo(client, rest);
     case "token":
@@ -169,12 +171,13 @@ async function runCreate(
 
   // Step 2: mint the token and compose the credentialed remote.
   let token: ArtifactsCreateTokenResult;
+  let credentialedRemote: string;
   try {
     token = await client.createToken(name, scope, ttl);
+    credentialedRemote = credentialURL(info.remote, token.plaintext);
   } catch (cause) {
     return mapError("create", cause);
   }
-  const credentialedRemote = credentialUrl(info.remote, token.plaintext);
 
   // Step 3: register the git remote, if a seam was wired.
   let remoteRegistered = false;
@@ -212,6 +215,58 @@ async function runCreate(
   );
 }
 
+// ---------------------------------------------------------------
+// share shorthand
+// ---------------------------------------------------------------
+//
+// `share` mints a token for an existing repo and prints just the
+// credentialed remote URL — a single clone/push-ready string, no
+// JSON envelope. It is the read-side counterpart to `create`: where
+// `create` sets up a repo and a push remote, `share` hands out a URL
+// someone else can clone from. Scope defaults to read since that is
+// the common case for handing a link to a consumer.
+
+async function runShare(client: ArtifactClient, args: string[]): Promise<ArtifactsCLIResult> {
+  const parsed = parseFlags(args, {
+    scope: { kind: "value" },
+    ttl: { kind: "value" },
+  });
+  if ("error" in parsed) return argvError("share", parsed.error);
+  const name = parsed.positional[0];
+  if (name === undefined) return argvError("share", "missing <name>");
+  if (parsed.positional.length > 1) {
+    return argvError("share", `unexpected argument '${parsed.positional[1]}'`);
+  }
+
+  let scope: ArtifactScope = "read";
+  if (parsed.flags.scope !== undefined) {
+    const s = parsed.flags.scope as string;
+    if (s !== "read" && s !== "write") {
+      return argvError("share", `--scope must be 'read' or 'write' (got '${s}')`);
+    }
+    scope = s;
+  }
+
+  let ttl: number | undefined;
+  if (parsed.flags.ttl !== undefined) {
+    try {
+      ttl = parseDuration(parsed.flags.ttl as string);
+    } catch (cause) {
+      return argvError("share", cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  try {
+    // Resolve the repo first so a missing repo fails before a token
+    // is minted.
+    const info = await client.get(name);
+    const token = await client.createToken(name, scope, ttl);
+    return ok(`${credentialURL(info.remote, token.plaintext)}\n`);
+  } catch (cause) {
+    return mapError("share", cause);
+  }
+}
+
 /** Resolve a repo, returning undefined on a clean not-found miss. */
 async function tryGet(
   client: ArtifactClient,
@@ -243,17 +298,19 @@ function isNotFound(cause: unknown): boolean {
  * token is the password.
  *
  * The token plaintext carries a trailing `?expires=<ts>` hint that is
- * not part of the credential. Embedding it verbatim would let the URL
- * parser percent-encode the `?` and `=` into the password and corrupt
- * it, so strip the suffix before use. Built through `URL` so the
- * remaining secret is encoded.
+ * not part of the credential, so strip it before use. The userinfo
+ * is spliced in textually rather than through `new URL`: the remote
+ * is already a well-formed absolute URL, and round-tripping it
+ * through the URL parser is both unnecessary and fragile under
+ * workerd, whose parser rejects inputs Node's accepts. Only the
+ * secret needs encoding, so encode just that.
  */
-export function credentialUrl(remote: string, token: string): string {
-  const secret = token.split("?expires=", 1)[0];
-  const url = new URL(remote);
-  url.username = "x";
-  url.password = secret;
-  return url.toString();
+export function credentialURL(remote: string, token: string): string {
+  const secret = encodeURIComponent(token.split("?expires=", 1)[0]);
+  const sep = remote.indexOf("://");
+  if (sep === -1) return remote;
+  const scheme = remote.slice(0, sep + 3);
+  return `${scheme}x:${secret}@${remote.slice(sep + 3)}`;
 }
 
 // ---------------------------------------------------------------
@@ -536,6 +593,7 @@ session's repositories.
 
 Commands:
    create  Create a repo, mint a token, and register a git remote.
+   share   Mint a token and print one clone-ready remote URL.
    repo    Manage repositories (create, get, list, delete, import).
    token   Manage git tokens for a repository.
    help    Show this help.
@@ -557,13 +615,22 @@ remote URL it prints is a secret. Re-running fails if the repo or
 remote already exists; --force reuses the repo and updates the
 remote so a half-finished run can be recovered.
 
-Output: reads and creates print JSON on stdout; delete and revoke
-print a one-line confirmation. Exit codes: 0 success, 1 the
-operation failed, 129 a malformed command line.
+The 'share' shorthand is the read-side counterpart:
 
-Secrets: 'create' and 'token create' print a token's plaintext, and
-'create' also prints a remote URL with that token embedded. 'token
-list' and 'token get' show metadata only.
+   artifacts share <name> [--scope read|write] [--ttl <dur>]
+
+It mints a token for an existing repo and prints just the
+credentialed remote URL on stdout — one clone/push-ready string, no
+JSON envelope. Scope defaults to read. The whole URL is a secret.
+
+Output: reads and creates print JSON on stdout; 'share' prints a
+single URL; delete and revoke print a one-line confirmation. Exit
+codes: 0 success, 1 the operation failed, 129 a malformed command
+line.
+
+Secrets: 'create', 'share', and 'token create' all surface a token
+(as plaintext, or embedded in the URL 'create'/'share' print).
+'token list' and 'token get' show metadata only.
 `;
 }
 

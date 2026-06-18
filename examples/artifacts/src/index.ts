@@ -31,7 +31,6 @@ interface CreateResult {
   projectDir: string;
   shareLink: string;
   cloneCommand: string;
-  tokenExpiresAt: string;
 }
 
 interface ArtifactCreateOutput {
@@ -39,11 +38,6 @@ interface ArtifactCreateOutput {
   remote: string;
   gitRemote: string;
   credentialedRemote: string;
-}
-
-interface TokenCreateOutput {
-  plaintext: string;
-  expiresAt: string;
 }
 
 const WORKSPACE_ROOT = "/workspace";
@@ -185,13 +179,12 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
       secretToRedact: created.credentialedRemote,
     });
 
-    const readToken = parseJSON<TokenCreateOutput>(
-      await exec(
-        ws,
-        `artifacts token create ${shellQuote(name)} --scope read --ttl ${SHARE_TOKEN_TTL}`,
-      ),
-    );
-    const shareLink = authenticatedArtifactRemote(created.remote, readToken.plaintext);
+    // `artifacts share` mints a read token and returns one
+    // clone-ready URL, so there is nothing to hand-assemble. The URL
+    // carries a live token — redact it from any error output.
+    const shareLink = (
+      await exec(ws, `artifacts share ${shellQuote(name)} --scope read --ttl ${SHARE_TOKEN_TTL}`)
+    ).trim();
 
     return Response.json({
       name,
@@ -201,7 +194,6 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
       projectDir,
       shareLink,
       cloneCommand: `git clone ${shellQuote(shareLink)} ${shellQuote(name)}`,
-      tokenExpiresAt: readToken.expiresAt,
     } satisfies CreateResult);
   } catch (cause) {
     return errorJSON(cause, isAlreadyExists(cause) ? 409 : 500);
@@ -244,11 +236,6 @@ function isAlreadyExists(cause: unknown): boolean {
     cause.name === "ArtifactsError" &&
     (cause as { code?: unknown }).code === "ALREADY_EXISTS"
   );
-}
-
-function authenticatedArtifactRemote(remote: string, token: string): string {
-  const secret = token.split("?expires=", 1)[0];
-  return `https://x:${encodeURIComponent(secret)}@${remote.slice("https://".length)}`;
 }
 
 function errorJSON(error: unknown, status: number): Response {

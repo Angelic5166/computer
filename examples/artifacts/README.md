@@ -40,7 +40,7 @@ The Worker endpoint owns the orchestration. The durable object stays minimal: it
 4. initializes and commits the generated project with the shell `git` command;
 5. runs `artifacts create <name> --remote origin --force` — one command that creates the session-scoped Artifact repo, mints a write token, and registers the credentialed remote as `origin`;
 6. pushes `HEAD:main` to `origin`;
-7. creates a short-lived read token with the shell `artifacts` command and returns a clone command.
+7. runs `artifacts share <name> --scope read` — one command that mints a short-lived read token and returns a single clone-ready URL — and returns a clone command built from it.
 
 A successful response looks like:
 
@@ -52,8 +52,7 @@ A successful response looks like:
   "branch": "main",
   "projectDir": "/workspace/my-generated-worker",
   "shareLink": "https://x:<token>@<account>.artifacts.cloudflare.net/git/workspace-artifacts-example/<repo>.git",
-  "cloneCommand": "git clone 'https://x:<token>@<account>.artifacts.cloudflare.net/git/workspace-artifacts-example/<repo>.git' my-generated-worker",
-  "tokenExpiresAt": "2026-06-17T00:00:00.000Z"
+  "cloneCommand": "git clone 'https://x:<token>@<account>.artifacts.cloudflare.net/git/workspace-artifacts-example/<repo>.git' my-generated-worker"
 }
 ```
 

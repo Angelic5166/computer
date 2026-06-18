@@ -69,13 +69,14 @@ argv-driven CLI backed by one implementation, so they cannot drift.
   Every flag-shape decision lives in `artifacts/cli.ts`; the typed
   methods and the CLI route to the same client.
 
-The one exception is the CLI's top-level `create` shorthand, which
-composes `create` and `createToken` and then registers a git remote.
-The composition and the git step are CLI-only: there is no single
-typed method for them, and the git step rides on an injected seam
-(below) rather than a client method. The pieces it composes are still
-the same client methods, so the two doors do not drift on the parts
-they share.
+The exceptions are the CLI's top-level shorthands. `create` composes
+`create` and `createToken` and then registers a git remote; `share`
+composes `get` and `createToken` and prints a single credentialed
+URL. These compositions are CLI-only — there is no single typed
+method for them, and `create`'s git step rides on an injected seam
+(below) rather than a client method. The pieces they compose are
+still the same client methods, so the two doors do not drift on the
+parts they share.
 
 ## Typed surface
 
@@ -115,8 +116,8 @@ result type carries a page of tokens plus a `total`. So
 
 ## CLI surface
 
-`artifacts.cli({ argv })` dispatches a top-level `create` shorthand
-plus two groups, `repo` and `token`.
+`artifacts.cli({ argv })` dispatches two top-level shorthands,
+`create` and `share`, plus two groups, `repo` and `token`.
 
 ```
 artifacts help                       # top-level help
@@ -126,6 +127,7 @@ artifacts token --help               # token group help
 
 artifacts create <name> [--scope read|write] [--ttl DUR] [--remote NAME] \
                         [--default-branch B] [--description D] [--force]
+artifacts share <name> [--scope read|write] [--ttl DUR]
 
 artifacts repo create <name> [--description D] [--default-branch B] [--read-only]
 artifacts repo get <name>
@@ -141,8 +143,9 @@ artifacts token delete <repo> <id|plaintext>   # alias: revoke
 
 Output is machine-first. Reads and data-producing mutations
 (`create`, `repo create`, `get`, `list`, `import`,
-`token create/list/get`) print JSON on stdout. `delete` and
-`token delete` print a one-line confirmation.
+`token create/list/get`) print JSON on stdout. `share` prints a
+single credentialed remote URL. `delete` and `token delete` print a
+one-line confirmation.
 
 ### The `create` shorthand
 
@@ -185,6 +188,24 @@ same `workspace.git.cli(...)` the built-in `git` command uses. The
 typed `create`/`createToken` methods never learn about git, so the
 JS API and the CLI cannot drift.
 
+### The `share` shorthand
+
+`artifacts share <name>` is the read-side counterpart to `create`.
+It mints a git token for an existing repo and prints just the
+credentialed remote URL on stdout — one clone/push-ready string, no
+JSON envelope — so a caller can hand off a link without parsing
+output or hand-building the URL.
+
+- `--scope` defaults to `read`: the common case is handing a
+  fetch-only link to a consumer. Pass `--scope write` for a
+  pushable URL.
+- `--ttl` takes the same duration grammar as `create`.
+
+The repo must already exist; a missing repo is a hard error (exit 1)
+and no token is minted. The whole printed URL is a secret — it
+carries a live token. Each call mints a fresh token, so revoking one
+shared link does not disturb others.
+
 Help is a first-class, agent-readable surface. `help`, `--help`,
 `-h`, and each group's `--help` print documentation that spells out
 the session-scoping contract and the secret-handling rules. A bare
@@ -201,8 +222,9 @@ the session-scoping contract and the secret-handling rules. A bare
 
 ### Secrets
 
-`token create` and the top-level `create` shorthand print a token's
-`plaintext`, and `repo create` / `import` return an initial `token`.
+`token create` and the `create` shorthand print a token's
+`plaintext`; `share` prints a remote URL with a live token embedded;
+and `repo create` / `import` return an initial `token`.
 The `create` shorthand additionally prints a `credentialedRemote`
 URL with that token embedded — treat the whole URL as a secret.
 `token list` and `token get` show metadata only. Capture a token's

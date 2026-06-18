@@ -6,7 +6,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeArtifactsBinding } from "../../tests/utilities/fake-artifacts-binding.js";
-import { credentialUrl } from "./cli.js";
+import { credentialURL } from "./cli.js";
 import { createArtifact } from "./client.js";
 
 function makeClient() {
@@ -20,9 +20,9 @@ async function run(argv: string[]) {
   return client.cli({ argv });
 }
 
-describe("credentialUrl", () => {
+describe("credentialURL", () => {
   it("embeds the token as basic-auth with the conventional x user", () => {
-    expect(credentialUrl("https://acct.example.net/git/repo.git", "art_v1_abc")).toBe(
+    expect(credentialURL("https://acct.example.net/git/repo.git", "art_v1_abc")).toBe(
       "https://x:art_v1_abc@acct.example.net/git/repo.git",
     );
   });
@@ -31,13 +31,20 @@ describe("credentialUrl", () => {
     // The real binding's plaintext carries a trailing
     // `?expires=<ts>`; folding it in verbatim would corrupt the
     // password and the remote would 401.
-    const url = credentialUrl(
+    const url = credentialURL(
       "https://acct.example.net/git/repo.git",
       "art_v1_secret?expires=1700000000",
     );
     expect(url).toBe("https://x:art_v1_secret@acct.example.net/git/repo.git");
     expect(url).not.toContain("expires");
     expect(new URL(url).password).toBe("art_v1_secret");
+  });
+
+  it("splices userinfo textually without round-tripping through new URL", () => {
+    // The remote may be a form workerd's URL parser rejects; the
+    // helper must not depend on `new URL` parsing it.
+    const url = credentialURL("https://h.example.net/git/ns/repo.git", "art_v1_x");
+    expect(url).toBe("https://x:art_v1_x@h.example.net/git/ns/repo.git");
   });
 });
 
@@ -224,6 +231,66 @@ describe("runArtifactsCLI", () => {
         argv: ["token", "create", "starter", "--scope", "admin"],
       });
       expect(res.exitCode).toBe(129);
+    });
+  });
+
+  // `share` mints a token for an existing repo and prints just the
+  // credentialed remote URL on stdout — a single clone/push-ready
+  // string a caller can hand off without parsing JSON.
+  describe("share (shorthand)", () => {
+    it("prints a single credentialed remote URL", async () => {
+      await client.cli({ argv: ["repo", "create", "starter"] });
+      const res = await client.cli({ argv: ["share", "starter", "--scope", "read"] });
+      expect(res.exitCode).toBe(0);
+      const url = res.stdout.trim();
+      // One line, no JSON envelope.
+      expect(url.split("\n")).toHaveLength(1);
+      expect(url.startsWith("https://x:")).toBe(true);
+      expect(url).toContain("art_v1_");
+      expect(url).toContain("sess1__starter.git");
+      // The expires hint must not leak into the password.
+      expect(url).not.toContain("?expires=");
+      const info = await binding.get("sess1__starter");
+      expect(url).toBe(credentialURL(info.remote, new URL(url).password));
+    });
+
+    it("defaults the scope to read", async () => {
+      await client.cli({ argv: ["repo", "create", "starter"] });
+      const res = await client.cli({ argv: ["share", "starter"] });
+      expect(res.exitCode).toBe(0);
+      const tokens = await binding.get("sess1__starter").then((r) => r.listTokens());
+      // Two tokens: the repo-create initial write token, plus this
+      // read share token.
+      const shared = tokens.tokens.find((t) => t.scope === "read");
+      expect(shared).toBeDefined();
+    });
+
+    it("accepts a unit-suffixed --ttl", async () => {
+      await client.cli({ argv: ["repo", "create", "starter"] });
+      const res = await client.cli({ argv: ["share", "starter", "--ttl", "30m"] });
+      expect(res.exitCode).toBe(0);
+    });
+
+    it("exits 129 on a malformed --ttl", async () => {
+      await client.cli({ argv: ["repo", "create", "starter"] });
+      const res = await client.cli({ argv: ["share", "starter", "--ttl", "5w"] });
+      expect(res.exitCode).toBe(129);
+    });
+
+    it("exits 129 on an invalid scope", async () => {
+      await client.cli({ argv: ["repo", "create", "starter"] });
+      const res = await client.cli({ argv: ["share", "starter", "--scope", "admin"] });
+      expect(res.exitCode).toBe(129);
+    });
+
+    it("exits 129 when the name is missing", async () => {
+      const res = await client.cli({ argv: ["share"] });
+      expect(res.exitCode).toBe(129);
+    });
+
+    it("exits 1 when the repo does not exist", async () => {
+      const res = await client.cli({ argv: ["share", "ghost"] });
+      expect(res.exitCode).toBe(1);
     });
   });
 
