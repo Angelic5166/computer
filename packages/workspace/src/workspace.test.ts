@@ -780,13 +780,13 @@ describe("Workspace transport-failure invalidation", () => {
         } finally {
           reader.releaseLock();
         }
-        return { rev: 0, appliedPushRev: input.senderRev };
+        return { rev: 0, appliedPushCursor: { rev: input.senderRev, path: null } };
       },
       async fetchChanges() {
         if (shouldFail) throw new WorkspaceTransportError("WebSocket closed");
         return {
-          currentRev: 0,
-          appliedPushRev: 0,
+          currentCursor: { rev: 0, path: null },
+          appliedPushCursor: { rev: 0, path: null },
           stream: new ReadableStream<import("@cloudflare/dofs").ChangeEntry>({
             start(c) {
               c.close();
@@ -795,7 +795,7 @@ describe("Workspace transport-failure invalidation", () => {
         };
       },
       async watermarks() {
-        return { currentRev: 0, pushRev: 0, fetchRev: 0 };
+        return { currentRev: 0, pushRev: 0, fetchCursor: { rev: 0, path: null } };
       },
     };
     const backend: WorkspaceBackend = {
