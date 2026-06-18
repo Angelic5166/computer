@@ -1023,3 +1023,24 @@ test("xattr: getxattr for a VFS-backed file returns correct codes", async () => 
   // removexattr returns ENODATA.
   expect(await status((cb) => ops.removexattr("/xattr-backed.txt", "user.x", cb))).toBe(-61);
 });
+
+test("FUSE ftruncate does not depend on fuse-native binding this", async () => {
+  const { vfs } = await createNodeVirtualFileSystem();
+  const ops = makeFUSEOps(vfs);
+
+  const create = await callback((cb: (errno: number, result: unknown) => void) =>
+    ops.create("/ftruncate-this.txt", 0o644, cb),
+  );
+  expect(create.errno).toBe(0);
+  const fh = create.result as number;
+
+  const payload = Buffer.from("abcdef", "utf8");
+  expect(
+    await status((cb) => ops.write("/ftruncate-this.txt", fh, payload, payload.byteLength, 0, cb)),
+  ).toBe(payload.byteLength);
+
+  const ftruncate = ops.ftruncate;
+  expect(await status((cb) => ftruncate.call(undefined, "/ftruncate-this.txt", fh, 3, cb))).toBe(0);
+  expect(await status((cb) => ops.flush("/ftruncate-this.txt", fh, cb))).toBe(0);
+  expect(Buffer.from(vfs.readFileSync("/ftruncate-this.txt")).toString("utf8")).toBe("abc");
+});

@@ -387,6 +387,56 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     }
   };
 
+  const truncatePath = (path: string, size: number, cb: StatusCallback): void => {
+    if (!exists(path)) {
+      cb(ERRNO.ENOENT);
+      return;
+    }
+    let entry = files.get(path);
+    if (entry === undefined) {
+      if (hasDirectWrites) {
+        if (size > MAX_FILE_BYTES) {
+          cb(ERRNO.EFBIG);
+          return;
+        }
+        try {
+          directWriteVfs.truncateFileSync?.(toVfs(path), size);
+          cb(0);
+        } catch (error) {
+          cb(toErrno(error));
+        }
+        return;
+      }
+      try {
+        const data = vfs.readFileSync(toVfs(path));
+        entry = {
+          buf: data,
+          size: data.length,
+          dirty: false,
+          dirtyRanges: [],
+          pendingCreate: false,
+          mode: modeFromVfs(path),
+          pendingMtime: new Date(),
+        };
+        files.set(path, entry);
+      } catch (error) {
+        cb(toErrno(error));
+        return;
+      }
+    }
+    if (size > entry.size) {
+      if (!ensureCapacity(entry, size)) {
+        cb(ERRNO.EFBIG);
+        return;
+      }
+      entry.buf.fill(0, entry.size, size);
+    }
+    const previousSize = entry.size;
+    entry.size = size;
+    markDirty(entry, Math.min(previousSize, size), Math.max(previousSize, size));
+    cb(0);
+  };
+
   const warnedOperations = new Set<string>();
   const notImplemented = (operation: string): NotImplementedOperation => {
     return (...args: unknown[]) => {
@@ -687,57 +737,11 @@ export function makeFUSEOps(vfs: NodeVirtualFileSystem, mountPoint = "/"): FuseO
     },
 
     truncate(path, size, cb) {
-      if (!exists(path)) {
-        cb(ERRNO.ENOENT);
-        return;
-      }
-      let entry = files.get(path);
-      if (entry === undefined) {
-        if (hasDirectWrites) {
-          if (size > MAX_FILE_BYTES) {
-            cb(ERRNO.EFBIG);
-            return;
-          }
-          try {
-            directWriteVfs.truncateFileSync?.(toVfs(path), size);
-            cb(0);
-          } catch (error) {
-            cb(toErrno(error));
-          }
-          return;
-        }
-        try {
-          const data = vfs.readFileSync(toVfs(path));
-          entry = {
-            buf: data,
-            size: data.length,
-            dirty: false,
-            dirtyRanges: [],
-            pendingCreate: false,
-            mode: modeFromVfs(path),
-            pendingMtime: new Date(),
-          };
-          files.set(path, entry);
-        } catch (error) {
-          cb(toErrno(error));
-          return;
-        }
-      }
-      if (size > entry.size) {
-        if (!ensureCapacity(entry, size)) {
-          cb(ERRNO.EFBIG);
-          return;
-        }
-        entry.buf.fill(0, entry.size, size);
-      }
-      const previousSize = entry.size;
-      entry.size = size;
-      markDirty(entry, Math.min(previousSize, size), Math.max(previousSize, size));
-      cb(0);
+      truncatePath(path, size, cb);
     },
 
     ftruncate(path, _fh, size, cb) {
-      this.truncate(path, size, cb);
+      truncatePath(path, size, cb);
     },
 
     unlink(path, cb) {
