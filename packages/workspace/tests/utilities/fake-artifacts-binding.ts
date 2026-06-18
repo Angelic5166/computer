@@ -54,13 +54,19 @@ export class FakeArtifactsBinding implements Artifacts {
   #mintToken(scope: ArtifactScope, ttl: number): FakeToken {
     const id = this.#nextId("tok");
     const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttl * 1000);
     return {
       id,
       scope,
       state: "active",
       createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + ttl * 1000).toISOString(),
-      plaintext: `art_v1_${id}`,
+      expiresAt: expiresAt.toISOString(),
+      // The real binding's plaintext carries a trailing
+      // `?expires=<unix-seconds>` hint that is not part of the
+      // credential. Mirror it so consumers that fold the token into a
+      // URL are exercised against the real shape — a fake without it
+      // lets that bug pass green.
+      plaintext: `art_v1_${id}?expires=${Math.floor(expiresAt.getTime() / 1000)}`,
     };
   }
 

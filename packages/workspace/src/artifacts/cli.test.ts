@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeArtifactsBinding } from "../../tests/utilities/fake-artifacts-binding.js";
+import { credentialUrl } from "./cli.js";
 import { createArtifact } from "./client.js";
 
 function makeClient() {
@@ -18,6 +19,27 @@ async function run(argv: string[]) {
   const { client } = makeClient();
   return client.cli({ argv });
 }
+
+describe("credentialUrl", () => {
+  it("embeds the token as basic-auth with the conventional x user", () => {
+    expect(credentialUrl("https://acct.example.net/git/repo.git", "art_v1_abc")).toBe(
+      "https://x:art_v1_abc@acct.example.net/git/repo.git",
+    );
+  });
+
+  it("strips the ?expires= hint so the password is the bare secret", () => {
+    // The real binding's plaintext carries a trailing
+    // `?expires=<ts>`; folding it in verbatim would corrupt the
+    // password and the remote would 401.
+    const url = credentialUrl(
+      "https://acct.example.net/git/repo.git",
+      "art_v1_secret?expires=1700000000",
+    );
+    expect(url).toBe("https://x:art_v1_secret@acct.example.net/git/repo.git");
+    expect(url).not.toContain("expires");
+    expect(new URL(url).password).toBe("art_v1_secret");
+  });
+});
 
 describe("runArtifactsCLI", () => {
   let binding: FakeArtifactsBinding;

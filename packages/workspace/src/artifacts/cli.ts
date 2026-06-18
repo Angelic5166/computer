@@ -240,12 +240,19 @@ function isNotFound(cause: unknown): boolean {
 /**
  * Fold a git token into a remote URL as basic-auth, yielding a
  * clone/push-ready URL. The username is the conventional `x`; the
- * token is the password. Built through `URL` so the token is encoded.
+ * token is the password.
+ *
+ * The token plaintext carries a trailing `?expires=<ts>` hint that is
+ * not part of the credential. Embedding it verbatim would let the URL
+ * parser percent-encode the `?` and `=` into the password and corrupt
+ * it, so strip the suffix before use. Built through `URL` so the
+ * remaining secret is encoded.
  */
-function credentialUrl(remote: string, token: string): string {
+export function credentialUrl(remote: string, token: string): string {
+  const secret = token.split("?expires=", 1)[0];
   const url = new URL(remote);
   url.username = "x";
-  url.password = token;
+  url.password = secret;
   return url.toString();
 }
 
