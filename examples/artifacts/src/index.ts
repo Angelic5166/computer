@@ -37,7 +37,8 @@ interface CreateResult {
 interface ArtifactCreateOutput {
   name: string;
   remote: string;
-  token: string;
+  gitRemote: string;
+  credentialedRemote: string;
 }
 
 interface TokenCreateOutput {
@@ -48,7 +49,8 @@ interface TokenCreateOutput {
 const WORKSPACE_ROOT = "/workspace";
 const SOURCE_REPO = "https://github.com/cloudflare/workspace";
 const EXAMPLE_PATH = "examples/worker";
-const SHARE_TOKEN_TTL_SECONDS = 24 * 60 * 60;
+const GIT_REMOTE = "origin";
+const SHARE_TOKEN_TTL = "24h";
 
 export class ArtifactCreator extends DurableObject<Env> {
   readonly #workspace: Workspace;
@@ -137,7 +139,6 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
   const ws = (await stub.getWorkspace()) as unknown as WorkspaceStub;
   const sourceDir = `${WORKSPACE_ROOT}/${name}-source`;
   const projectDir = `${WORKSPACE_ROOT}/${name}`;
-  let createdRepo = false;
 
   try {
     await exec(
@@ -157,33 +158,37 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
       { cwd: projectDir },
     );
 
-    // Make the demo easy to rerun with the same name. The repo is
-    // session-scoped by createArtifact() inside the durable object,
-    // so this only replaces the project this endpoint owns.
-    await exec(ws, `artifacts repo delete ${shellQuote(name)} || true`);
+    // One command does the three setup steps: create the repo, mint
+    // a write token, and register the credentialed remote as
+    // `origin` in the project. `--force` makes the demo rerunnable
+    // with the same name — the repo is session-scoped by
+    // createArtifact() in the durable object, so this only touches
+    // the project this endpoint owns. The credentialed remote URL is
+    // a secret, so it is redacted from any error output.
     const created = parseJSON<ArtifactCreateOutput>(
       await exec(
         ws,
         [
-          "artifacts repo create",
+          "artifacts create",
           shellQuote(name),
+          `--remote ${GIT_REMOTE}`,
+          "--force",
           "--default-branch main",
           `--description ${shellQuote(`Generated from ${SOURCE_REPO}/${EXAMPLE_PATH}`)}`,
         ].join(" "),
+        { cwd: projectDir },
       ),
     );
-    createdRepo = true;
 
-    const pushRemote = authenticatedArtifactRemote(created.remote, created.token);
-    await exec(ws, `git push --force ${shellQuote(pushRemote)} HEAD:main`, {
+    await exec(ws, `git push --force ${shellQuote(GIT_REMOTE)} HEAD:main`, {
       cwd: projectDir,
-      secretToRedact: pushRemote,
+      secretToRedact: created.credentialedRemote,
     });
 
     const readToken = parseJSON<TokenCreateOutput>(
       await exec(
         ws,
-        `artifacts token create ${shellQuote(name)} --scope read --ttl ${SHARE_TOKEN_TTL_SECONDS}`,
+        `artifacts token create ${shellQuote(name)} --scope read --ttl ${SHARE_TOKEN_TTL}`,
       ),
     );
     const shareLink = authenticatedArtifactRemote(created.remote, readToken.plaintext);
@@ -199,7 +204,6 @@ async function handleCreate(request: Request, env: Env): Promise<Response> {
       tokenExpiresAt: readToken.expiresAt,
     } satisfies CreateResult);
   } catch (cause) {
-    if (createdRepo) await exec(ws, `artifacts repo delete ${shellQuote(name)}`).catch(() => "");
     return errorJSON(cause, isAlreadyExists(cause) ? 409 : 500);
   } finally {
     ws[Symbol.dispose]?.();

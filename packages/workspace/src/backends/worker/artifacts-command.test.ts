@@ -13,22 +13,37 @@ import { encodeUtf8ToBytes as encodeUTF8ToBytes } from "just-bash";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ArtifactsCLIInput, ArtifactsCLIResult } from "../../artifacts/index.js";
+import type { GitCliInput, GitCliResult } from "../../git/index.js";
 import { type ArtifactsCommandHost, defineArtifactsCommand } from "./artifacts-command.js";
 
 function fakeHost(
   impl: (input: ArtifactsCLIInput) => Promise<ArtifactsCLIResult> | ArtifactsCLIResult,
+  gitImpl: (input: GitCliInput) => Promise<GitCliResult> | GitCliResult = () => ({
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+  }),
 ): {
   host: ArtifactsCommandHost;
   calls: ArtifactsCLIInput[];
+  gitCalls: GitCliInput[];
 } {
   const calls: ArtifactsCLIInput[] = [];
+  const gitCalls: GitCliInput[] = [];
   return {
     calls,
+    gitCalls,
     host: {
       artifacts: {
         cli: vi.fn(async (input) => {
           calls.push(input);
           return await impl(input);
+        }),
+      },
+      git: {
+        cli: vi.fn(async (input) => {
+          gitCalls.push(input);
+          return await gitImpl(input);
         }),
       },
     },
@@ -88,5 +103,59 @@ describe("defineArtifactsCommand", () => {
     expect(res.exitCode).toBe(1);
     expect(res.stderr).toContain("workspace stub disposed");
     expect(res.stdout).toBe("");
+  });
+
+  describe("remoteAdd bridge", () => {
+    // The artifacts CLI calls input.remoteAdd; the bridge backs it
+    // with the workspace git CLI bound to the shell cwd. Drive the
+    // bridge directly by having the fake artifacts CLI invoke the
+    // seam it was handed.
+    it("registers a remote through git remote add at the shell cwd", async () => {
+      const { host, gitCalls } = fakeHost(async (input) => {
+        const r = await input.remoteAdd?.({ name: "origin", url: "https://x:tok@h/r.git" });
+        return { stdout: JSON.stringify(r), stderr: "", exitCode: 0 };
+      });
+      const cmd = defineArtifactsCommand(host);
+      const res = await cmd.execute(["create", "starter"], makeContext({ cwd: "/workspace/app" }));
+      expect(JSON.parse(res.stdout)).toEqual({ ok: true });
+      // A list probe (no --force) then the add, both at the cwd.
+      expect(gitCalls.map((c) => c.argv)).toEqual([
+        ["remote"],
+        ["remote", "add", "origin", "https://x:tok@h/r.git"],
+      ]);
+      expect(gitCalls.every((c) => c.cwd === "/workspace/app")).toBe(true);
+    });
+
+    it("reports a name collision as { exists: true } without --force", async () => {
+      const { host } = fakeHost(
+        async (input) => {
+          const r = await input.remoteAdd?.({ name: "origin", url: "https://x:tok@h/r.git" });
+          return { stdout: JSON.stringify(r), stderr: "", exitCode: 0 };
+        },
+        (input) =>
+          input.argv[0] === "remote" && input.argv.length === 1
+            ? { stdout: "origin\n", stderr: "", exitCode: 0 }
+            : { stdout: "", stderr: "", exitCode: 0 },
+      );
+      const cmd = defineArtifactsCommand(host);
+      const res = await cmd.execute(["create", "starter"], makeContext());
+      expect(JSON.parse(res.stdout)).toEqual({ ok: false, exists: true });
+    });
+
+    it("passes --force through to git remote add and skips the probe", async () => {
+      const { host, gitCalls } = fakeHost(async (input) => {
+        const r = await input.remoteAdd?.({
+          name: "origin",
+          url: "https://x:tok@h/r.git",
+          force: true,
+        });
+        return { stdout: JSON.stringify(r), stderr: "", exitCode: 0 };
+      });
+      const cmd = defineArtifactsCommand(host);
+      await cmd.execute(["create", "starter", "--force"], makeContext());
+      expect(gitCalls.map((c) => c.argv)).toEqual([
+        ["remote", "add", "--force", "origin", "https://x:tok@h/r.git"],
+      ]);
+    });
   });
 });

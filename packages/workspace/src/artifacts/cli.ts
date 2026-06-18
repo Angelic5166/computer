@@ -14,14 +14,41 @@
 // `--help` all print agent-readable documentation.
 
 import type { ArtifactClient } from "./client.js";
+import { parseDuration } from "./duration.js";
 import { ArtifactError } from "./errors.js";
 import type { ArtifactScope } from "./types.js";
+
+/**
+ * Git seam for the `create` shorthand. The artifacts package owns no
+ * git; the worker backend supplies this closure, bound to the same
+ * `workspace.git.cli(...)` the `git` shell command uses, so `create`
+ * can register the remote without the package depending on git.
+ *
+ * Returns `ok` on success. On failure, `exists: true` distinguishes a
+ * remote-name collision (recoverable with `--force`) from any other
+ * git error, so the dispatcher can point the caller at the right fix.
+ * When `force` is set the implementation updates the existing remote
+ * (the moral equivalent of `git remote set-url`) rather than failing.
+ */
+export interface RemoteAddFn {
+  (opts: {
+    name: string;
+    url: string;
+    force?: boolean;
+  }): Promise<{ ok: boolean; exists?: boolean; message?: string }>;
+}
 
 export interface ArtifactsCLIInput {
   /** Argv as seen by the shell command. `argv[0]` is the group. */
   argv: string[];
   /** Environment variables. Reserved for future use. */
   env?: Record<string, string>;
+  /**
+   * Optional git seam used only by the `create` shorthand to register
+   * the remote. When absent, `create` skips the git step and instead
+   * reports a ready-to-run `git remote add` line.
+   */
+  remoteAdd?: RemoteAddFn;
 }
 
 export interface ArtifactsCLIResult {
@@ -46,6 +73,8 @@ export async function runArtifactsCLI(
     case "--help":
     case "-h":
       return ok(topLevelHelp());
+    case "create":
+      return await runCreate(client, rest, input.remoteAdd);
     case "repo":
       return await runRepo(client, rest);
     case "token":
@@ -53,6 +82,171 @@ export async function runArtifactsCLI(
     default:
       return fail(`artifacts: '${group}' is not an artifacts command. See 'artifacts help'.`);
   }
+}
+
+// ---------------------------------------------------------------
+// create shorthand
+// ---------------------------------------------------------------
+//
+// `create` composes the three steps a caller otherwise runs by hand:
+// create the repo, mint a git token, and register a git remote whose
+// URL carries that token. It is a convenience over the `repo` and
+// `token` primitives, not a replacement — those still exist for the
+// uncomposed cases.
+//
+// The three steps are sequential side effects, so a failure can leave
+// a repo (and token) behind. `--force` makes the command converge:
+// an existing repo is reused rather than treated as a collision, and
+// an existing remote is updated rather than refused. Without it,
+// either pre-existing piece is a hard error whose message points at
+// `--force`, so a half-finished previous run has a clear recovery.
+
+async function runCreate(
+  client: ArtifactClient,
+  args: string[],
+  remoteAdd: RemoteAddFn | undefined,
+): Promise<ArtifactsCLIResult> {
+  const parsed = parseFlags(args, {
+    scope: { kind: "value" },
+    ttl: { kind: "value" },
+    remote: { kind: "value" },
+    "default-branch": { kind: "value" },
+    description: { kind: "value" },
+    force: { kind: "bool" },
+  });
+  if ("error" in parsed) return argvError("create", parsed.error);
+  const name = parsed.positional[0];
+  if (name === undefined) return argvError("create", "missing <name>");
+  if (parsed.positional.length > 1) {
+    return argvError("create", `unexpected argument '${parsed.positional[1]}'`);
+  }
+
+  // Scope defaults to write: the point of the shorthand is to set up a
+  // remote you can push to. A read default would register an origin
+  // that rejects the first push.
+  let scope: ArtifactScope = "write";
+  if (parsed.flags.scope !== undefined) {
+    const s = parsed.flags.scope as string;
+    if (s !== "read" && s !== "write") {
+      return argvError("create", `--scope must be 'read' or 'write' (got '${s}')`);
+    }
+    scope = s;
+  }
+
+  let ttl: number | undefined;
+  if (parsed.flags.ttl !== undefined) {
+    try {
+      ttl = parseDuration(parsed.flags.ttl as string);
+    } catch (cause) {
+      return argvError("create", cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  const force = parsed.flags.force === true;
+  const gitRemote = (parsed.flags.remote as string | undefined) ?? name;
+  const description = parsed.flags.description as string | undefined;
+  const setDefaultBranch = parsed.flags["default-branch"] as string | undefined;
+
+  // Step 1: create the repo, or adopt an existing one under --force.
+  // `get` and `create` return different shapes; only the fields the
+  // shorthand reports are needed, and both carry those.
+  let info: { name: string; remote: string; defaultBranch: string };
+  try {
+    const existing = await tryGet(client, name);
+    if (existing !== undefined) {
+      if (!force) {
+        return fail(
+          `artifacts create: repo '${name}' already exists; re-run with --force to reuse it and refresh the remote`,
+        );
+      }
+      info = existing;
+    } else {
+      info = await client.create(name, { description, setDefaultBranch });
+    }
+  } catch (cause) {
+    return mapError("create", cause);
+  }
+
+  // Step 2: mint the token and compose the credentialed remote.
+  let token: ArtifactsCreateTokenResult;
+  try {
+    token = await client.createToken(name, scope, ttl);
+  } catch (cause) {
+    return mapError("create", cause);
+  }
+  const credentialedRemote = credentialUrl(info.remote, token.plaintext);
+
+  // Step 3: register the git remote, if a seam was wired.
+  let remoteRegistered = false;
+  let remoteAddCommand: string | undefined;
+  if (remoteAdd === undefined) {
+    remoteAddCommand = `git remote add ${gitRemote} ${credentialedRemote}`;
+  } else {
+    const result = await remoteAdd({ name: gitRemote, url: credentialedRemote, force });
+    if (!result.ok) {
+      if (result.exists === true && !force) {
+        return fail(
+          `artifacts create: remote '${gitRemote}' already exists; re-run with --force to update its URL`,
+        );
+      }
+      return fail(
+        `artifacts create: could not register remote '${gitRemote}'${result.message ? `: ${result.message}` : ""}`,
+      );
+    }
+    remoteRegistered = true;
+  }
+
+  return ok(
+    json({
+      name: info.name,
+      remote: info.remote,
+      credentialedRemote,
+      defaultBranch: info.defaultBranch,
+      gitRemote,
+      scope,
+      token: token.plaintext,
+      tokenExpiresAt: token.expiresAt,
+      remoteRegistered,
+      ...(remoteAddCommand !== undefined ? { remoteAddCommand } : {}),
+    }),
+  );
+}
+
+/** Resolve a repo, returning undefined on a clean not-found miss. */
+async function tryGet(
+  client: ArtifactClient,
+  name: string,
+): Promise<ArtifactsRepoInfo | undefined> {
+  try {
+    return await client.get(name);
+  } catch (cause) {
+    if (isNotFound(cause)) return undefined;
+    throw cause;
+  }
+}
+
+/** True when a thrown error is a repo-not-found miss from either layer. */
+function isNotFound(cause: unknown): boolean {
+  if (cause instanceof ArtifactError) return cause.code === "ENOTFOUND";
+  // The binding raises its own ArtifactsError with code NOT_FOUND.
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    (cause as { code?: unknown }).code === "NOT_FOUND"
+  );
+}
+
+/**
+ * Fold a git token into a remote URL as basic-auth, yielding a
+ * clone/push-ready URL. The username is the conventional `x`; the
+ * token is the password. Built through `URL` so the token is encoded.
+ */
+function credentialUrl(remote: string, token: string): string {
+  const url = new URL(remote);
+  url.username = "x";
+  url.password = token;
+  return url.toString();
 }
 
 // ---------------------------------------------------------------
@@ -254,14 +448,11 @@ async function runTokenCreate(client: ArtifactClient, args: string[]): Promise<A
 
   let ttl: number | undefined;
   if (parsed.flags.ttl !== undefined) {
-    const n = Number.parseInt(parsed.flags.ttl as string, 10);
-    if (!Number.isFinite(n) || n < 1) {
-      return argvError(
-        "token create",
-        `--ttl requires a positive integer (got ${JSON.stringify(parsed.flags.ttl)})`,
-      );
+    try {
+      ttl = parseDuration(parsed.flags.ttl as string);
+    } catch (cause) {
+      return argvError("token create", cause instanceof Error ? cause.message : String(cause));
     }
-    ttl = n;
   }
 
   try {
@@ -337,6 +528,7 @@ the way in and stripped on the way out. 'repo list' shows only this
 session's repositories.
 
 Commands:
+   create  Create a repo, mint a token, and register a git remote.
    repo    Manage repositories (create, get, list, delete, import).
    token   Manage git tokens for a repository.
    help    Show this help.
@@ -344,12 +536,27 @@ Commands:
 Run 'artifacts repo --help' or 'artifacts token --help' for the
 subcommands in each group.
 
+The 'create' shorthand composes the common setup in one step:
+
+   artifacts create <name> [--scope read|write] [--ttl <dur>]
+                           [--remote <name>] [--default-branch <b>]
+                           [--description <text>] [--force]
+
+It creates the repo, mints a git token (scope defaults to write),
+and registers a git remote whose URL carries that token. --remote
+names the git remote (default: <name>). --ttl accepts seconds or a
+unit-suffixed duration like 30s, 5m, 1h, 2h30m. The credentialed
+remote URL it prints is a secret. Re-running fails if the repo or
+remote already exists; --force reuses the repo and updates the
+remote so a half-finished run can be recovered.
+
 Output: reads and creates print JSON on stdout; delete and revoke
 print a one-line confirmation. Exit codes: 0 success, 1 the
 operation failed, 129 a malformed command line.
 
-Secrets: 'token create' is the only command that prints a token's
-plaintext. 'token list' and 'token get' show metadata only.
+Secrets: 'create' and 'token create' print a token's plaintext, and
+'create' also prints a remote URL with that token embedded. 'token
+list' and 'token get' show metadata only.
 `;
 }
 
@@ -386,10 +593,12 @@ function tokenHelp(): string {
 Tokens authenticate git operations against a repository's remote.
 The <repo> argument is a session-scoped local name.
 
-   token create <repo> [--scope read|write] [--ttl <seconds>]
+   token create <repo> [--scope read|write] [--ttl <dur>]
        Mint a token. Prints JSON: { id, plaintext, scope, expiresAt }.
        The plaintext is shown ONCE here and nowhere else — capture it.
-       --scope defaults to write. --ttl defaults to the service default.
+       --scope defaults to write. --ttl accepts seconds or a unit-
+       suffixed duration (30s, 5m, 1h, 2h30m); defaults to the
+       service default.
 
    token list <repo>
        Print JSON: { total, tokens: [{ id, scope, state, ... }] }.

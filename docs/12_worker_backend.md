@@ -197,11 +197,15 @@ handle.
 The shell isolate registers built-in `git` and `artifacts` commands
 that forward through the `WorkspaceStub` returned by
 `getWorkspace()`: `git` calls `workspace.git.cli(...)`, and
-`artifacts` calls `workspace.artifacts.cli(...)`. `ShellWorker` still
-exposes an `extraCommands(ws)` hook for layering project-specific
-commands onto the same Bash instance. The hook runs once per `exec`
-with the live host stub the shell already reached, so a command
-shares that stub's lifetime without refetching.
+`artifacts` calls `workspace.artifacts.cli(...)`. The `artifacts`
+command also bridges the two: its `create` shorthand registers a git
+remote, so the command hands the artifacts CLI a `remoteAdd` closure
+backed by the same `workspace.git.cli(...)`. The artifacts package
+owns no git of its own; the bridge lives at the backend wiring layer.
+`ShellWorker` still exposes an `extraCommands(ws)` hook for layering
+project-specific commands onto the same Bash instance. The hook runs
+once per `exec` with the live host stub the shell already reached, so
+a command shares that stub's lifetime without refetching.
 
 A host durable object wires the Artifacts command by passing the
 binding to `Workspace`:

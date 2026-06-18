@@ -273,4 +273,178 @@ describe("runArtifactsCLI", () => {
       expect(res.stderr.toLowerCase()).toContain("invalid");
     });
   });
+
+  // The composed shorthand: create repo, mint a token, register a
+  // git remote whose URL carries the token. The git step is the
+  // injected `remoteAdd` seam — the artifacts package never imports
+  // git. A fake records the calls and simulates a name conflict.
+  describe("create (shorthand)", () => {
+    interface RemoteCall {
+      name: string;
+      url: string;
+      force: boolean;
+    }
+
+    function makeRemoteAdd(options: { existing?: string[] } = {}) {
+      const calls: RemoteCall[] = [];
+      const existing = new Set(options.existing ?? []);
+      const remoteAdd = async (opts: { name: string; url: string; force?: boolean }) => {
+        const force = opts.force === true;
+        calls.push({ name: opts.name, url: opts.url, force });
+        if (existing.has(opts.name) && !force) {
+          return { ok: false, exists: true, message: `remote ${opts.name} already exists` };
+        }
+        existing.add(opts.name);
+        return { ok: true };
+      };
+      return { remoteAdd, calls };
+    }
+
+    it("creates the repo, mints a token, and registers a credentialed remote", async () => {
+      const { remoteAdd, calls } = makeRemoteAdd();
+      const res = await client.cli({ argv: ["create", "starter"], remoteAdd });
+
+      expect(res.exitCode).toBe(0);
+      expect(binding.repos.has("sess1__starter")).toBe(true);
+      const json = JSON.parse(res.stdout);
+      expect(json.name).toBe("starter");
+      expect(json.scope).toBe("write");
+      expect(json.gitRemote).toBe("starter");
+      expect(json.remoteRegistered).toBe(true);
+      // The bare remote is non-secret; the credentialed one carries
+      // the token as basic-auth and is the one that was registered.
+      expect(json.remote).not.toContain("art_v1_");
+      expect(json.credentialedRemote).toContain("art_v1_");
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ name: "starter", force: false });
+      expect(calls[0].url).toBe(json.credentialedRemote);
+    });
+
+    it("defaults the git remote name to the repo name", async () => {
+      const { remoteAdd, calls } = makeRemoteAdd();
+      await client.cli({ argv: ["create", "starter"], remoteAdd });
+      expect(calls[0].name).toBe("starter");
+    });
+
+    it("honors --remote to register under a different name", async () => {
+      const { remoteAdd, calls } = makeRemoteAdd();
+      const res = await client.cli({
+        argv: ["create", "starter", "--remote", "origin"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(0);
+      expect(calls[0].name).toBe("origin");
+      expect(JSON.parse(res.stdout).gitRemote).toBe("origin");
+    });
+
+    it("mints a read-scoped token when asked", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const res = await client.cli({
+        argv: ["create", "starter", "--scope", "read"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(0);
+      expect(JSON.parse(res.stdout).scope).toBe("read");
+    });
+
+    it("exits 129 on an invalid scope", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const res = await client.cli({
+        argv: ["create", "starter", "--scope", "admin"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(129);
+    });
+
+    it("accepts a unit-suffixed --ttl", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const res = await client.cli({
+        argv: ["create", "starter", "--ttl", "30m"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(0);
+    });
+
+    it("exits 129 on a malformed --ttl", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const res = await client.cli({
+        argv: ["create", "starter", "--ttl", "5w"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(129);
+    });
+
+    it("forwards --description and --default-branch to the repo", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const res = await client.cli({
+        argv: ["create", "starter", "--description", "hi", "--default-branch", "trunk"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(0);
+      const json = JSON.parse(res.stdout);
+      expect(json.defaultBranch).toBe("trunk");
+    });
+
+    it("exits 129 when the name is missing", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const res = await client.cli({ argv: ["create"], remoteAdd });
+      expect(res.exitCode).toBe(129);
+    });
+
+    it("prints a git remote add line when no remoteAdd seam is wired", async () => {
+      const res = await client.cli({ argv: ["create", "starter"] });
+      expect(res.exitCode).toBe(0);
+      const json = JSON.parse(res.stdout);
+      expect(json.remoteRegistered).toBe(false);
+      expect(json.remoteAddCommand).toContain("git remote add");
+      expect(json.remoteAddCommand).toContain("starter");
+    });
+
+    // --- recovery / idempotence -------------------------------
+
+    it("fails when the repo already exists, pointing at --force", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      await client.cli({ argv: ["create", "starter"], remoteAdd });
+
+      const res = await client.cli({ argv: ["create", "starter"], remoteAdd });
+      expect(res.exitCode).toBe(1);
+      expect(res.stderr).toContain("--force");
+      expect(res.stderr.toLowerCase()).toContain("already exists");
+    });
+
+    it("reuses an existing repo under --force without re-creating it", async () => {
+      const { remoteAdd } = makeRemoteAdd();
+      const first = JSON.parse(
+        (await client.cli({ argv: ["create", "starter"], remoteAdd })).stdout,
+      );
+
+      const res = await client.cli({ argv: ["create", "starter", "--force"], remoteAdd });
+      expect(res.exitCode).toBe(0);
+      const second = JSON.parse(res.stdout);
+      // Same repo, but a freshly minted token.
+      expect(second.name).toBe("starter");
+      expect(second.credentialedRemote).not.toBe(first.credentialedRemote);
+    });
+
+    it("fails when the git remote already exists, pointing at --force", async () => {
+      const { remoteAdd } = makeRemoteAdd({ existing: ["origin"] });
+      const res = await client.cli({
+        argv: ["create", "starter", "--remote", "origin"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(1);
+      expect(res.stderr).toContain("--force");
+    });
+
+    it("updates an existing git remote under --force", async () => {
+      const { remoteAdd, calls } = makeRemoteAdd({ existing: ["origin"] });
+      const res = await client.cli({
+        argv: ["create", "starter", "--remote", "origin", "--force"],
+        remoteAdd,
+      });
+      expect(res.exitCode).toBe(0);
+      expect(JSON.parse(res.stdout).remoteRegistered).toBe(true);
+      expect(calls[0].force).toBe(true);
+    });
+  });
 });

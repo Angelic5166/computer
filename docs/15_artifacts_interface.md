@@ -69,6 +69,14 @@ argv-driven CLI backed by one implementation, so they cannot drift.
   Every flag-shape decision lives in `artifacts/cli.ts`; the typed
   methods and the CLI route to the same client.
 
+The one exception is the CLI's top-level `create` shorthand, which
+composes `create` and `createToken` and then registers a git remote.
+The composition and the git step are CLI-only: there is no single
+typed method for them, and the git step rides on an injected seam
+(below) rather than a client method. The pieces it composes are still
+the same client methods, so the two doors do not drift on the parts
+they share.
+
 ## Typed surface
 
 `createArtifact(binding, sessionId)` returns an `ArtifactClient`:
@@ -84,7 +92,7 @@ argv-driven CLI backed by one implementation, so they cannot drift.
 | `listTokens(name)` | A repo's token page (metadata only). |
 | `getToken(name, id)` | One token's metadata from that page. Throws `NotFoundError` on a miss. |
 | `revokeToken(name, tokenOrId)` | Revoke a token. Returns `false` on a miss. |
-| `cli(input)` | The argv door (below). |
+| `cli(input)` | The argv door (below). `input` may also carry a `remoteAdd` seam used only by the CLI `create` shorthand. |
 
 `opts` for `create` carries `description`, `readOnly`, and
 `setDefaultBranch`. `source` for `import` carries `url`, `branch`,
@@ -107,7 +115,8 @@ result type carries a page of tokens plus a `total`. So
 
 ## CLI surface
 
-`artifacts.cli({ argv })` dispatches two groups, `repo` and `token`.
+`artifacts.cli({ argv })` dispatches a top-level `create` shorthand
+plus two groups, `repo` and `token`.
 
 ```
 artifacts help                       # top-level help
@@ -115,22 +124,66 @@ artifacts --help | -h                # alias for help
 artifacts repo --help                # repo group help
 artifacts token --help               # token group help
 
+artifacts create <name> [--scope read|write] [--ttl DUR] [--remote NAME] \
+                        [--default-branch B] [--description D] [--force]
+
 artifacts repo create <name> [--description D] [--default-branch B] [--read-only]
 artifacts repo get <name>
 artifacts repo list
 artifacts repo delete <name>
 artifacts repo import <name> --url U [--branch B] [--depth N] [--read-only] [--description D]
 
-artifacts token create <repo> [--scope read|write] [--ttl SECONDS]
+artifacts token create <repo> [--scope read|write] [--ttl DUR]
 artifacts token list <repo>
 artifacts token get <repo> <id>
 artifacts token delete <repo> <id|plaintext>   # alias: revoke
 ```
 
 Output is machine-first. Reads and data-producing mutations
-(`create`, `get`, `list`, `import`, `token create/list/get`) print
-JSON on stdout. `delete` and `token delete` print a one-line
-confirmation.
+(`create`, `repo create`, `get`, `list`, `import`,
+`token create/list/get`) print JSON on stdout. `delete` and
+`token delete` print a one-line confirmation.
+
+### The `create` shorthand
+
+`artifacts create <name>` composes the three steps a caller
+otherwise runs by hand: it creates the repo, mints a git token, and
+registers a git remote whose URL carries that token. It is a
+convenience over the `repo` and `token` primitives, which remain for
+the uncomposed cases.
+
+- `--scope` defaults to `write`: the point of the shorthand is a
+  remote you can push to. A `read` default would register an origin
+  that rejects the first push.
+- `--remote` names the git remote to register; it defaults to
+  `<name>`, so `--remote origin` is the common override.
+- `--ttl` accepts either bare seconds or a unit-suffixed duration —
+  `30s`, `5m`, `1h`, `2h30m`, `1d`. The same grammar applies to
+  `token create --ttl`. A bare integer is still seconds, so existing
+  invocations keep working.
+
+The printed JSON carries the bare `remote` (non-secret), the
+`credentialedRemote` (the push/clone-ready URL with the token folded
+in as basic-auth — a secret), `defaultBranch`, the `gitRemote` name,
+the `scope`, the token `plaintext`, and `remoteRegistered`. When the
+shell wires no git seam, `remoteRegistered` is `false` and a
+`remoteAddCommand` field carries a ready-to-run `git remote add`
+line instead.
+
+The three steps are sequential side effects, so a failure can leave
+a repo (and token) behind. Re-running a bare `create` then fails
+because the repo already exists. `--force` is the recovery path: it
+reuses an existing repo rather than treating it as a collision, and
+updates an existing git remote rather than refusing it. Without
+`--force`, either pre-existing piece is a hard error (exit 1) whose
+message names `--force`. Each `--force` run mints a fresh token; the
+prior token keeps working until its TTL.
+
+The git step is injected. The artifacts package owns no git: the
+worker backend hands the CLI a `remoteAdd` closure backed by the
+same `workspace.git.cli(...)` the built-in `git` command uses. The
+typed `create`/`createToken` methods never learn about git, so the
+JS API and the CLI cannot drift.
 
 Help is a first-class, agent-readable surface. `help`, `--help`,
 `-h`, and each group's `--help` print documentation that spells out
@@ -148,11 +201,12 @@ the session-scoping contract and the secret-handling rules. A bare
 
 ### Secrets
 
-`token create` is the only command that prints a token's
-`plaintext`, and `create` / `import` are the only commands that
-return an initial `token`. `token list` and `token get` show
-metadata only. Capture a token's plaintext when it is minted; it is
-not retrievable afterward.
+`token create` and the top-level `create` shorthand print a token's
+`plaintext`, and `repo create` / `import` return an initial `token`.
+The `create` shorthand additionally prints a `credentialedRemote`
+URL with that token embedded — treat the whole URL as a secret.
+`token list` and `token get` show metadata only. Capture a token's
+plaintext when it is minted; it is not retrievable afterward.
 
 ## Running the CLI inside the shell
 
@@ -196,6 +250,13 @@ Inside `bash.exec`, `artifacts repo list` then forwards across the
 loopback to the client's `cli(...)`. The shell isolate has no
 network of its own; the binding call happens host-side, the same way
 network-bound `git` subcommands do.
+
+The `create` shorthand's git step rides the same wiring. The shell's
+`artifacts` command hands the CLI a `remoteAdd` closure backed by
+`workspace.git.cli(...)`, bound to the shell's working directory, so
+the remote is registered host-side in the repo the caller is sitting
+in. No extra binding is needed beyond the git surface the
+`WorkspaceStub` already exposes.
 
 ## Types
 

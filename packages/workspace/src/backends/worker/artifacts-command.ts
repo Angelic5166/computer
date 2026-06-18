@@ -20,10 +20,17 @@
 
 import { type CustomCommand, defineCommand } from "just-bash";
 
-import type { ArtifactsCLIInput, ArtifactsCLIResult } from "../../artifacts/index.js";
+import type { ArtifactsCLIInput, ArtifactsCLIResult, RemoteAddFn } from "../../artifacts/index.js";
+import type { GitCommandHost } from "./git-command.js";
 
-/** Structural subset of the host the command needs. */
-export interface ArtifactsCommandHost {
+/**
+ * Structural subset of the host the command needs. It owns the
+ * artifacts client and the workspace git CLI: the `create` shorthand
+ * registers a git remote, and the artifacts package has no git of its
+ * own, so the command bridges the two by handing the artifacts CLI a
+ * `remoteAdd` closure backed by `git.cli(...)`.
+ */
+export interface ArtifactsCommandHost extends GitCommandHost {
   artifacts: {
     cli(input: ArtifactsCLIInput): Promise<ArtifactsCLIResult>;
   };
@@ -42,8 +49,31 @@ export function defineArtifactsCommand(host: ArtifactsCommandHost): CustomComman
     const env: Record<string, string> = {};
     for (const [k, v] of ctx.env) env[k] = v;
 
+    // Bridge the `create` shorthand's git step to the workspace git
+    // CLI. Bound to the shell's cwd so the remote lands in the repo
+    // the caller is sitting in. Collisions are detected by listing
+    // first, so the artifacts CLI can tell "name taken" (recoverable
+    // with --force) apart from any other git failure.
+    const remoteAdd: RemoteAddFn = async ({ name, url, force }) => {
+      if (force !== true) {
+        const listed = await host.git.cli({ argv: ["remote"], cwd: ctx.cwd, env });
+        const names = listed.stdout
+          .split("\n")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (names.includes(name)) return { ok: false, exists: true };
+      }
+      const addArgs =
+        force === true ? ["remote", "add", "--force", name, url] : ["remote", "add", name, url];
+      const result = await host.git.cli({ argv: addArgs, cwd: ctx.cwd, env });
+      if (result.exitCode !== 0) {
+        return { ok: false, message: (result.stderr || result.stdout).trim() };
+      }
+      return { ok: true };
+    };
+
     try {
-      const result = await host.artifacts.cli({ argv: args, env });
+      const result = await host.artifacts.cli({ argv: args, env, remoteAdd });
       return {
         stdout: result.stdout,
         stderr: result.stderr,

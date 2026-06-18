@@ -142,7 +142,7 @@ export class ShellWorker<
     const customCommands: CustomCommand[] = [
       defineGitCommand(ws),
       defineAssetsCommand(ws),
-      defineArtifactsCommand({ artifacts: ws.artifacts }),
+      defineArtifactsCommand({ artifacts: ws.artifacts, git: ws.git }),
       ...this.extraCommands(ws),
     ];
 

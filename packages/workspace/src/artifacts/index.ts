@@ -18,7 +18,7 @@
 // types from `@cloudflare/workers-types`; this module re-exports
 // only what it owns.
 
-export type { ArtifactsCLIInput, ArtifactsCLIResult } from "./cli.js";
+export type { ArtifactsCLIInput, ArtifactsCLIResult, RemoteAddFn } from "./cli.js";
 export { runArtifactsCLI } from "./cli.js";
 export type {
   ArtifactClient,
