@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
-import type { FileStore } from "../stores/types.js";
+import type { FileStore } from "./types.js";
 
 export interface ReadToolOptions {
   store: FileStore;

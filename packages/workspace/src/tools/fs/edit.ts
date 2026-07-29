@@ -9,8 +9,8 @@ import {
   normalizeToLF,
   restoreLineEndings,
   stripBom,
-} from "../edit-diff.js";
-import type { FileStore } from "../stores/types.js";
+} from "./edit-diff.js";
+import type { FileStore } from "./types.js";
 
 export interface EditToolOptions {
   store: FileStore;
@@ -106,49 +106,53 @@ export function createEditTool(options: EditToolOptions) {
       }
 
       return withFileLock(path, async () => {
-        const stat = await store.stat(path);
-        if (!stat) return { error: `File not found: ${path}` };
-        if (stat.size > maxBytes) {
-          return {
-            error: `File too large to edit: ${stat.size} bytes exceeds the ${maxBytes}-byte cap. Use the write tool to rewrite the file from scratch.`,
-          };
-        }
-
-        const bytes = await store.readAll(path);
-        if (!bytes) return { error: `File not found: ${path}` };
-
-        const rawContent = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(
-          bytes,
-        );
-        const { bom, text } = stripBom(rawContent);
-        const ending = detectLineEnding(text);
-        const normalized = normalizeToLF(text);
-
-        let baseContent: string;
-        let newContent: string;
         try {
-          ({ baseContent, newContent } = applyEditsToNormalizedContent(normalized, edits, path));
+          const stat = await store.stat(path);
+          if (!stat) return { error: `File not found: ${path}` };
+          if (stat.size > maxBytes) {
+            return {
+              error: `File too large to edit: ${stat.size} bytes exceeds the ${maxBytes}-byte cap. Use the write tool to rewrite the file from scratch.`,
+            };
+          }
+
+          const bytes = await store.readAll(path);
+          if (!bytes) return { error: `File not found: ${path}` };
+
+          const rawContent = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(
+            bytes,
+          );
+          const { bom, text } = stripBom(rawContent);
+          const ending = detectLineEnding(text);
+          const normalized = normalizeToLF(text);
+
+          let baseContent: string;
+          let newContent: string;
+          try {
+            ({ baseContent, newContent } = applyEditsToNormalizedContent(normalized, edits, path));
+          } catch (err) {
+            return { error: err instanceof Error ? err.message : String(err) };
+          }
+
+          const finalContent = bom + restoreLineEndings(newContent, ending);
+          // Round-trip the file's mode so editing an executable script (or any
+          // file with a non-default mode) doesn't silently drop bits. `stat.mode`
+          // is undefined for stores that don't track modes; pass `undefined` in
+          // that case so the store applies its own default.
+          await store.write(path, new TextEncoder().encode(finalContent), { mode: stat.mode });
+
+          const diffResult = generateDiffString(baseContent, newContent);
+          const patch = generateUnifiedPatch(path, baseContent, newContent);
+
+          return {
+            path,
+            editsApplied: edits.length,
+            diff: diffResult.diff,
+            patch,
+            firstChangedLine: diffResult.firstChangedLine,
+          };
         } catch (err) {
           return { error: err instanceof Error ? err.message : String(err) };
         }
-
-        const finalContent = bom + restoreLineEndings(newContent, ending);
-        // Round-trip the file's mode so editing an executable script (or any
-        // file with a non-default mode) doesn't silently drop bits. `stat.mode`
-        // is undefined for stores that don't track modes; pass `undefined` in
-        // that case so the store applies its own default.
-        await store.write(path, new TextEncoder().encode(finalContent), { mode: stat.mode });
-
-        const diffResult = generateDiffString(baseContent, newContent);
-        const patch = generateUnifiedPatch(path, baseContent, newContent);
-
-        return {
-          path,
-          editsApplied: edits.length,
-          diff: diffResult.diff,
-          patch,
-          firstChangedLine: diffResult.firstChangedLine,
-        };
       });
     },
   });

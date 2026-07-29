@@ -1,22 +1,21 @@
 /**
- * `FileStore` adapter over `@cloudflare/workspace`'s `Workspace.fs`
- * surface. Hackspace's fs-tools assumed a flat `stat / readFile /
- * writeFile` shape; the next-branch `Workspace` nests them under
- * `.fs` and returns a different stat result. This adapter is the
- * only place that knows.
+ * `FileStore` adapter over `Workspace.fs`.
  *
- * Reads go through `fs.readFile(path, "utf8" | ReadFileOptions)` —
- * for binary we ask for a `ReadableStream<Uint8Array>` and stitch it
- * back together either chunk-by-chunk (`readChunks`) or all at once
- * (`readAll`).
+ * The AI tools operate on a small file-store contract so their read,
+ * write, and edit behavior can stay independent of the full Workspace
+ * class. This adapter is the bridge from that contract to the public
+ * `workspace.fs` surface.
+ *
+ * Reads go through `fs.readFile(path)` as a `ReadableStream<Uint8Array>`
+ * and are stitched together either chunk-by-chunk (`readChunks`) or all
+ * at once (`readAll`).
  */
 
 import type { FileStat, FileStore } from "./types.js";
 
 /**
- * Structural subset of `@cloudflare/workspace.Workspace` we depend
- * on. Avoids a hard type-time import so this module can be vendored
- * around the example with no fuss.
+ * Structural subset of `@cloudflare/workspace.Workspace` the tools
+ * depend on.
  */
 export interface WorkspaceLike {
   fs: {
@@ -28,10 +27,6 @@ export interface WorkspaceLike {
       isDirectory: boolean;
     }>;
     readFile(path: string): Promise<ReadableStream<Uint8Array>>;
-    readFile(
-      path: string,
-      options: { offset?: number; length?: number },
-    ): Promise<ReadableStream<Uint8Array>>;
     writeFile(path: string, content: Uint8Array, options?: { mode?: number }): Promise<void>;
     mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
     rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
@@ -69,20 +64,54 @@ export class WorkspaceFileStore implements FileStore {
   }
 
   async *readChunks(path: string, byteOffset = 0, byteLength?: number): AsyncIterable<Uint8Array> {
-    // The Workspace readFile already returns a chunked stream; we just
-    // re-yield with the requested offset/length applied at the source.
-    const options: { offset?: number; length?: number } = {};
-    if (byteOffset > 0) options.offset = byteOffset;
-    if (byteLength !== undefined) options.length = byteLength;
-    const stream = await this.ws.fs.readFile(path, options);
+    if (byteOffset < 0) throw new Error("readChunks: byteOffset must be non-negative");
+    if (byteLength !== undefined && byteLength < 0) {
+      throw new Error("readChunks: byteLength must be non-negative");
+    }
+    if (byteLength === 0) return;
+
+    const stream = await this.ws.fs.readFile(path);
     const reader = stream.getReader();
+    let skipped = 0;
+    let yielded = 0;
+    let completed = false;
     try {
       while (true) {
         const { value, done } = await reader.read();
-        if (done) break;
-        if (value && value.byteLength > 0) yield value;
+        if (done) {
+          completed = true;
+          break;
+        }
+        if (!value || value.byteLength === 0) continue;
+
+        let start = 0;
+        if (skipped < byteOffset) {
+          const needed = byteOffset - skipped;
+          if (value.byteLength <= needed) {
+            skipped += value.byteLength;
+            continue;
+          }
+          start = needed;
+          skipped = byteOffset;
+        }
+
+        let end = value.byteLength;
+        if (byteLength !== undefined) {
+          const remaining = byteLength - yielded;
+          if (remaining <= 0) break;
+          end = Math.min(end, start + remaining);
+        }
+
+        if (end > start) {
+          const chunk = value.slice(start, end);
+          yielded += chunk.byteLength;
+          yield chunk;
+        }
+
+        if (byteLength !== undefined && yielded >= byteLength) break;
       }
     } finally {
+      if (!completed) await reader.cancel();
       reader.releaseLock();
     }
   }

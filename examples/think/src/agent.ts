@@ -8,12 +8,13 @@
  *     by a Cloudflare Container running `wsd`. Mirrors the pattern
  *     in examples/container.
  *   - Think's own `workspace` field expects a string-based
- *     `WorkspaceLike` for its built-in workspace tools. We satisfy
- *     it with a small adapter over the container workspace and turn
- *     off `workspaceBash` because we expose our own `exec` tool.
- *     We also shadow Think's `read`/`write`/`edit` tool names with
- *     our vendored fs-tools (their streaming/byte-cap behaviour is
- *     friendlier for this example).
+ *     `WorkspaceLike` for its built-in workspace tools. The Workspace
+ *     is constructed with `useThink: true` to add that compatibility
+ *     surface, and `workspaceBash` is off because
+ *     `@cloudflare/workspace/tools` provides the `exec` tool. We also
+ *     shadow Think's `read`/`write`/`edit` tool names with the shared
+ *     Workspace tools so this example uses the same caps and edit
+ *     behavior as package consumers.
  *
  * Phase model:
  *   - The workflow flips `phase` via `setPhase("explore" | "structure")`
@@ -46,19 +47,10 @@ import {
   withWorkspaceContainer,
 } from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
-import { type ToolSet, tool } from "ai";
+import { createAITools } from "@cloudflare/workspace/tools";
+import type { ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { z } from "zod";
-import { createExecTool } from "./tools/exec.js";
-import {
-  createEditTool,
-  createReadTool,
-  createWriteTool,
-  type WorkspaceLike as FsWorkspaceLike,
-  WorkspaceFileStore,
-} from "./tools/fs/index.js";
 import { createReportUpdateTool } from "./tools/report-update.js";
-import { createShareTool } from "./tools/share.js";
 
 // Re-export so the runtime can build loopback bindings the DO
 // uses: WorkspaceProxy carries container egress traffic back to
@@ -216,6 +208,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
       mounts: {
         "/workspace/.agents": R2Bucket(env.R2_SKILLS, { prefix: ".agents/" }),
       },
+      useThink: true,
       ...(hasAssetsConfig(env)
         ? {
             assets: (ws: Workspace) =>
@@ -229,11 +222,11 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
         : {}),
     });
 
-    // Hand Think an adapter that satisfies its WorkspaceLike, so the
+    // Hand Think the compatibility methods added by useThink, so the
     // baseline read/write/edit tools have something to delegate to —
     // even though we shadow most of those names below. Think's
     // built-in tools land on the default backend (the shell).
-    this.workspace = adaptToThinkWorkspace(this.#workspaceFs) as unknown as ThinkWorkspaceLike;
+    this.workspace = this.#workspaceFs as unknown as ThinkWorkspaceLike;
 
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context = (await this.ctx.storage.get<TriageContext>(CONTEXT_KEY)) ?? null;
@@ -600,20 +593,17 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     const phase = this.#phase ?? "explore";
     if (phase === "structure") return {} as ToolSet;
 
-    const store = new WorkspaceFileStore(adaptToFsWorkspace(this.#workspaceFs));
     const ws = this.#workspaceFs;
-    return {
+    const workspaceTools = createAITools({
+      workspace: ws,
+      assets: hasAssetsConfig(this.env),
       // Per-tool caps. Kimi K2.6 has a 262k context window so we
       // don't need to be paranoid; the caps are mostly so a
       // pathological tool call (giant lockfile, multi-MB log) doesn't
       // burn through the input budget on a single turn. ~32 KiB ≈
       // ~8k tokens per read.
-      read: createReadTool({ store, maxBytes: 32 * 1024, maxLines: 800 }),
-      ls: createLsTool(ws),
-      write: createWriteTool({ store }),
-      edit: createEditTool({ store }),
-      exec: createExecTool({
-        workspace: ws,
+      read: { maxBytes: 32 * 1024, maxLines: 800 },
+      shell: {
         maxBytes: 32 * 1024,
         backends: {
           shell: {
@@ -644,22 +634,12 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
           },
         },
         defaultBackend: "shell",
-      }),
+      },
+    });
+
+    return {
+      ...workspaceTools,
       report_update: createReportUpdateTool({ webhookUrl: ctx.webhookUrl }),
-      // Only offered when R2 S3 credentials are configured; the
-      // bucket binding alone can't mint the presigned URL the tool
-      // returns. Absent credentials, the agent simply has no share
-      // tool rather than one that fails on every call.
-      ...(hasAssetsConfig(this.env)
-        ? {
-            share: createShareTool({
-              workspace: ws,
-              bucket: this.env.ASSETS,
-              s3Bucket: "think-example-assets",
-              env: this.env as unknown as Record<string, string | undefined>,
-            }),
-          }
-        : {}),
     };
   }
 
@@ -757,163 +737,6 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
         }),
     );
   }
-}
-
-// ── Adapters ───────────────────────────────────────────────────────
-
-/**
- * Bridge from `@cloudflare/workspace.Workspace` to the vendored
- * fs-tools' `WorkspaceLike` shape. The vendored tools only call into
- * `fs.{stat,readFile,writeFile,mkdir}`, which the container
- * workspace already exposes directly.
- */
-function adaptToFsWorkspace(ws: Workspace): FsWorkspaceLike {
-  return ws as unknown as FsWorkspaceLike;
-}
-
-/**
- * Bridge from `@cloudflare/workspace.Workspace` to Think's
- * string-shaped `WorkspaceLike`. Think only constructs the default
- * workspace tools lazily; nothing calls these methods unless the
- * model actually invokes a default tool, and our `getTools()`
- * shadows the names we care about. The adapters exist so the Think
- * baseline doesn't crash if it does fire.
- */
-function adaptToThinkWorkspace(ws: Workspace) {
-  return {
-    async readFile(path: string): Promise<string | null> {
-      try {
-        return await ws.fs.readFile(path, "utf8");
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    async readFileBytes(path: string): Promise<Uint8Array | null> {
-      try {
-        const stream = await ws.fs.readFile(path);
-        return await drain(stream);
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    async writeFile(path: string, content: string): Promise<void> {
-      await ws.fs.writeFile(path, new TextEncoder().encode(content));
-    },
-    async mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> {
-      await ws.fs.mkdir(path, opts?.recursive ? { recursive: true } : {});
-    },
-    async rm(path: string, opts?: { recursive?: boolean; force?: boolean }): Promise<void> {
-      await ws.fs.rm(path, {
-        ...(opts?.recursive ? { recursive: true as const } : {}),
-        ...(opts?.force ? { force: true as const } : {}),
-      });
-    },
-    async stat(path: string) {
-      try {
-        const s = await ws.fs.stat(path);
-        return {
-          path,
-          name: path.split("/").pop() ?? path,
-          type: s.isDirectory ? ("directory" as const) : ("file" as const),
-          size: s.size,
-          modifiedAt: new Date(s.mtime),
-          isDirectory: s.isDirectory,
-          isFile: s.isFile,
-        };
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-    },
-    async readDir(dir: string) {
-      const entries = await ws.fs.readdir(dir);
-      return entries.map((e) => ({
-        path: `${dir}/${e.name}`,
-        name: e.name,
-        type: e.isDirectory ? ("directory" as const) : ("file" as const),
-        size: 0,
-        modifiedAt: new Date(0),
-        isDirectory: e.isDirectory,
-        isFile: e.isFile,
-      }));
-    },
-    async glob(pattern: string) {
-      // Cheap shim — full glob semantics aren't needed in this demo.
-      // Think's built-in grep filters by `entry.type === "file"`, so
-      // we have to stat each candidate to know whether it's a blob.
-      // ws.fs.find already returns the type alongside the path, so
-      // forward it directly instead of re-stat'ing. Without this,
-      // every grep returned filesSearched: 0.
-      const matches = await ws.fs.find("/workspace", pattern);
-      return matches.map((m) => ({
-        path: m.path,
-        name: m.path.split("/").pop() ?? m.path,
-        type: m.type === "dir" ? ("directory" as const) : ("file" as const),
-        size: 0,
-        modifiedAt: new Date(0),
-        isDirectory: m.type === "dir",
-        isFile: m.type === "file",
-      }));
-    },
-  };
-}
-
-function isEnoent(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; message?: string };
-  if (e.code === "ENOENT") return true;
-  return typeof e.message === "string" && /ENOENT|no such/i.test(e.message);
-}
-
-async function drain(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) {
-        parts.push(value);
-        total += value.byteLength;
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  if (parts.length === 1) return parts[0];
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const p of parts) {
-    out.set(p, off);
-    off += p.byteLength;
-  }
-  return out;
-}
-
-// ── A small `ls` tool: vendored fs-tools don't include it. ─────────
-
-function createLsTool(ws: Workspace) {
-  return tool({
-    description:
-      "List the immediate children of a workspace directory. Returns " +
-      "names with their type (file/dir). One level only.",
-    inputSchema: z.object({
-      path: z.string().describe("Absolute directory path."),
-    }),
-    execute: async ({ path }) => {
-      const entries = await ws.fs.readdir(path);
-      return {
-        path,
-        entries: entries.map((e) => ({
-          name: e.name,
-          type: e.isDirectory ? "dir" : "file",
-        })),
-      };
-    },
-  });
 }
 
 // ── Small helpers ─────────────────────────────────────────────────────────────

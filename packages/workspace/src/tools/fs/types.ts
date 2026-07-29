@@ -1,10 +1,9 @@
 /**
- * Vendored verbatim from `@cloudflare/fs-tools` on the `hackspace`
- * branch. The interface is the boundary every fs-tool talks to;
- * stores are cheap to construct and safe to share across concurrent
- * tool invocations. Streaming methods MUST NOT load the full file
- * into memory at any single point — that is the whole reason the
- * boundary exists.
+ * File-store boundary used by the workspace file tools. Stores are
+ * cheap to construct and safe to share across concurrent tool
+ * invocations. Streaming methods MUST NOT load the full file into
+ * memory at any single point — that is the whole reason the boundary
+ * exists.
  */
 export interface FileStat {
   /** Size in bytes. */

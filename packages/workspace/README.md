@@ -68,6 +68,10 @@ uniform; the counts are just always zero.
   an Artifacts binding, the worker backend exposes the same CLI as
   an `artifacts` custom command. See
   [`docs/15_artifacts_interface.md`](../../docs/15_artifacts_interface.md).
+- `createAITools` (from `@cloudflare/workspace/tools`) — AI SDK
+  tools for agents: `read`, `write`, `edit`, `ls`, optional `exec`,
+  and optional `publish`. See
+  [`docs/09_tool_interface.md`](../../docs/09_tool_interface.md).
 
 ## Typical DO-side usage
 
@@ -133,6 +137,10 @@ await ws.fs.writeFile("/notes.md", "hello");
 const body = await ws.fs.readFile("/notes.md", "utf8");
 // ws.shell throws — there's no backend wired up.
 ```
+
+Pass `useThink: true` when assigning the same instance to
+`Think.workspace`. That adds Think's compatibility methods directly
+on the instance while keeping the primary file API on `workspace.fs`.
 
 Git, also without a backend:
 
