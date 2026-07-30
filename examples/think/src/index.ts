@@ -8,17 +8,19 @@
  * v7 TUI; the browser could connect to the same DO with `useAgentChat`
  * from `@cloudflare/think/react`.
  *
- * The Assistant and WorkspaceServiceProxy classes are re-exported so
- * the runtime can resolve them by name: Assistant is the DO binding,
- * WorkspaceServiceProxy is the loopback Fetcher the worker backend
- * hands into its Dynamic Worker so the in-isolate shell can reach back
- * into the host workspace.
+ * The Assistant, WorkspaceProxy, and WorkspaceServiceProxy classes are
+ * re-exported so the runtime can resolve them by name: Assistant is
+ * the DO binding and container class, WorkspaceProxy carries wsd's
+ * outbound /ws upgrade back to the DO, and WorkspaceServiceProxy is
+ * the loopback Fetcher the worker backend hands into its Dynamic
+ * Worker so the in-isolate shell can reach back into the host
+ * workspace.
  */
 
 import { routeAgentRequest } from "agents";
-import { Assistant, WorkspaceServiceProxy } from "./agent.js";
+import { Assistant, WorkspaceProxy, WorkspaceServiceProxy } from "./agent.js";
 
-export { Assistant, WorkspaceServiceProxy };
+export { Assistant, WorkspaceProxy, WorkspaceServiceProxy };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

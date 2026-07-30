@@ -1,24 +1,35 @@
 // Worker + Durable Object hosting a minimal @cloudflare/think chat
-// agent. The Assistant DO owns one @cloudflare/workspace VFS whose
-// shell is a Dynamic Worker loaded through env.LOADER (just-bash, no
-// container). Connect to it from a terminal with `npm run chat`.
+// agent. The Assistant DO owns one @cloudflare/workspace VFS with a
+// fast Dynamic Worker shell backend and a Cloudflare Container backend
+// for full Linux commands. Connect to it from a terminal with
+// `npm run chat`.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "think-example",
   "main": "src/index.ts",
-  "compatibility_date": "2026-05-26",
+  "compatibility_date": "2026-07-26",
   "compatibility_flags": ["nodejs_compat", "experimental"],
 
-  "ai": { "binding": "AI" },
+  "ai": { "binding": "AI", "remote": true },
+
+  "containers": [
+    {
+      "class_name": "Assistant",
+      // Built from the local Dockerfile, which copies wsd into a
+      // small Debian image with Node/npm/git for real build and test
+      // workflows.
+      "image": "./Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 5,
+      "rollout_active_grace_period": 0,
+      "rollout_step_percentage": [100]
+    }
+  ],
 
   // Worker Loader binding. The Assistant's Workspace mounts a worker
   // backend (just-bash in a Dynamic Worker) that dials through
   // env.LOADER.
-  "worker_loaders": [
-    {
-      "binding": "LOADER"
-    }
-  ],
+  "worker_loaders": [{ "binding": "LOADER" }],
 
   "durable_objects": {
     "bindings": [{ "name": "Assistant", "class_name": "Assistant" }]

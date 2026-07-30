@@ -8,16 +8,16 @@
  * Workspace, the shared `@cloudflare/workspace/tools`, and nothing
  * task-specific. You talk to it from a terminal (see `cli/chat.mjs`)
  * and it can read, write, and edit files in its workspace and run
- * shell commands through the worker backend.
+ * shell commands through either workspace backend.
  *
  * Wiring:
  *   - `Think` (via the Durable Object base) hands us the message
  *     store, agentic loop, and chat protocol.
- *   - We own a `@cloudflare/workspace.Workspace` whose single backend
- *     is a `WorkerBackend` — just-bash in a Dynamic Worker loaded
- *     through `env.LOADER`. No container, no Docker: instant boot and
- *     broad textual tooling, including a built-in `git` command that
- *     forwards to the host workspace.
+ *   - We own a `@cloudflare/workspace.Workspace` with two backends:
+ *     a WorkerBackend (`"shell"`) for fast just-bash text tooling and
+ *     a CloudflareContainerBackend (`"container"`) for full Linux
+ *     userland through wsd. This mirrors examples/container while
+ *     keeping the chat surface unchanged.
  *   - `useThink: true` adds the string-based compatibility surface
  *     Think expects; the cast promotes it from optional to present.
  *     `workspaceBash` is off because `@cloudflare/workspace/tools`
@@ -29,23 +29,40 @@ import {
   type DurableObjectStorageLike,
   type ThinkWorkspaceCompatibility,
   Workspace,
+  WorkspaceProxy,
   WorkspaceServiceProxy,
   type WorkspaceStub,
 } from "@cloudflare/workspace";
+import {
+  CloudflareContainerBackend,
+  withWorkspaceContainer,
+} from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { createAITools } from "@cloudflare/workspace/tools";
 import type { ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
-// Re-export so the runtime can wrap WorkspaceServiceProxy into a
-// loopback Fetcher binding. The WorkerBackend reaches the wrapped
-// class through `ctx.exports.WorkspaceServiceProxy(...)` so the
-// in-isolate shell can call back into the host workspace.
-export { WorkspaceServiceProxy };
+// Re-export so the runtime can build loopback bindings. The
+// WorkerBackend reaches WorkspaceServiceProxy through
+// `ctx.exports.WorkspaceServiceProxy(...)` so the in-isolate shell
+// can call back into the host workspace. WorkspaceProxy carries the
+// container's outbound /ws egress back to this DO.
+export { WorkspaceProxy, WorkspaceServiceProxy };
 
-const MODEL_ID = "@cf/moonshotai/kimi-k2.6";
+const MODEL_ID = "@cf/zai-org/glm-5.2";
 
-export class Assistant extends Think<Env> {
+// Identifies this durable object to both backends: the worker
+// backend's loopback Fetcher and the container's egress table route
+// back to the Workspace by binding name and id.
+function workspaceRef(ctx: DurableObjectState) {
+  return { binding: "Assistant", id: ctx.id.toString() };
+}
+
+// Anchor Think's generic before the mixin so withWorkspaceContainer
+// sees a concrete constructor.
+class AssistantBase extends Think<Env> {}
+
+export class Assistant extends withWorkspaceContainer(AssistantBase) {
   /** We have a dedicated `exec` tool; skip Think's built-in bash. */
   override workspaceBash = false;
 
@@ -53,10 +70,23 @@ export class Assistant extends Think<Env> {
   override maxSteps = 20;
 
   /**
-   * Think's workspace, owned outright. Its single backend is a
-   * Dynamic Worker running just-bash. `useThink: true` adds the
-   * string-based filesystem methods Think's baseline expects; the
-   * cast promotes them from optional to present.
+   * Container backend used when `exec` needs a real Linux userland.
+   * The DO itself owns the container binding through the
+   * withWorkspaceContainer mixin; CloudflareContainerBackend handles
+   * startup, outbound egress interception, the /ws upgrade, and the
+   * capnweb session.
+   */
+  readonly #containerBackend = new CloudflareContainerBackend({
+    id: "container",
+    container: () => this,
+    workspace: workspaceRef(this.ctx),
+  });
+
+  /**
+   * Think's workspace, owned outright. The first backend in the list
+   * is the default, so unqualified exec calls use the fast just-bash
+   * shell. Passing `{ backend: "container" }` routes a call to wsd in
+   * the Cloudflare Container.
    */
   override workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
@@ -64,17 +94,28 @@ export class Assistant extends Think<Env> {
       new WorkerBackend({
         id: "shell",
         loader: this.env.LOADER,
-        workspace: { binding: "Assistant", id: this.ctx.id.toString() },
+        workspace: workspaceRef(this.ctx),
         ctx: this.ctx,
       }),
+      this.#containerBackend,
     ],
     useThink: true,
   }) as Workspace & ThinkWorkspaceCompatibility;
 
+  /** Forwarded by WorkspaceProxy for wsd's outbound /ws upgrade. */
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/ws") {
+      return this.#containerBackend.handleFetch(request);
+    }
+    return super.fetch(request);
+  }
+
   /**
    * Hand out a typed RPC stub to the workspace. The worker backend's
    * WorkspaceServiceProxy dispatches to this so the in-isolate shell
-   * can reach back into the host workspace.
+   * can reach back into the host workspace; WorkspaceProxy uses the
+   * same method for the container's capnweb egress path.
    */
   async __getWorkspaceStub(): Promise<WorkspaceStub> {
     await this.workspace.ready();
@@ -95,13 +136,19 @@ export class Assistant extends Think<Env> {
       "                 `exec cat` / `exec ls`.",
       "  - write, edit: create and modify files. Prefer these over",
       "                 `exec sed` / shell heredocs.",
-      "  - exec:        run shell commands (just-bash), including `git`",
-      "                 (clone / status / diff / log). Only https:// git",
-      "                 URLs are supported. Use this for anything the",
-      "                 file tools can't do.",
+      "  - exec:        run shell commands. Use the default `shell`",
+      "                 backend first: it is just-bash in a Dynamic",
+      "                 Worker, cold-starts quickly, and includes `git`",
+      "                 (clone / status / diff / log) via the host",
+      "                 workspace. Only https:// git URLs are supported.",
+      "                 Use backend `container` when you need full Linux",
+      "                 userland: npm, node, python, package managers,",
+      "                 test runners, or other real binaries.",
       "",
       "Keep replies concise. Use the tools instead of guessing about",
-      "files you can read.",
+      "files you can read. When an `exec` command fails because the",
+      "selected backend lacks a tool, retry on a backend whose",
+      "description covers that command.",
     ].join("\n");
   }
 
@@ -114,13 +161,24 @@ export class Assistant extends Think<Env> {
           shell: {
             description:
               "just-bash in a Dynamic Worker. Cold-start fast, no " +
-              "container. Good for cat / grep / sed / awk / jq / head / " +
-              "tail / sort / find and for `git` (clone / status / diff / " +
-              "log) — the shell registers a built-in `git` command that " +
-              "forwards to the host workspace, so `git clone` works even " +
-              "though the isolate has no public network of its own. Only " +
+              "container, no public network. Good for cat / grep / sed / " +
+              "awk / jq / head / tail / sort / find, quick file " +
+              "inspection, text transformations, and `git` (clone / " +
+              "status / diff / log) — the shell registers a built-in " +
+              "`git` command that forwards to the host workspace, so " +
+              "network-bound subcommands like `git clone` work even " +
+              "though the isolate itself has no public network. Only " +
               "https:// URLs are supported. Cannot run npm, node, python, " +
               "or any binary outside just-bash's built-in command set.",
+          },
+          container: {
+            description:
+              "Cloudflare Container running wsd over capnweb. Full Linux " +
+              "userland: npm, node, python, package managers, test " +
+              "runners, real binaries on $PATH, and public network. Cold " +
+              "start is much slower because the container must boot; " +
+              "reach for it when the shell backend can't run the command. " +
+              "For git itself, prefer the shell backend.",
           },
         },
       },

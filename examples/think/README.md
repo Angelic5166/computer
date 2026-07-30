@@ -11,10 +11,12 @@ A minimal example that puts [`@cloudflare/think`][think] behind a
 terminal chat interface. The agent is a Durable Object with a
 [`@cloudflare/workspace`][workspace] VFS for a working directory and
 the shared file and shell tools from
-[`@cloudflare/workspace/tools`][tools]. There is no task workflow: you
-open a terminal, type, and talk to the agent, and it uses its tools to
-read, write, and run commands in its workspace when a reply calls for
-it.
+[`@cloudflare/workspace/tools`][tools]. The Workspace has both the
+fast worker shell backend and a container backend, so the same `exec`
+tool can run quick text commands or full Linux userland commands.
+There is no task workflow: you open a terminal, type, and talk to the
+agent, and it uses its tools to read, write, and run commands in its
+workspace when a reply calls for it.
 
 The terminal client is the [AI SDK v7][aisdk7] TUI (`@ai-sdk/tui`). It
 talks to the agent over the same WebSocket chat protocol a browser
@@ -34,7 +36,8 @@ client (npm run chat)                 worker
    ├────────────────────────────────────▶  Assistant DO (Think)
    │  /agents/assistant/<name>           │    ├── Workers AI model
    │                                     │    └── @cloudflare/workspace VFS
-   │  ◀───────── streamed reply ─────────┤          └── worker backend (env.LOADER)
+   │  ◀───────── streamed reply ─────────┤          ├── worker backend (env.LOADER)
+   │                                                └── container backend (wsd)
 ```
 
 `src/index.ts` hands every request to `routeAgentRequest`, which
@@ -60,28 +63,36 @@ does not configure the assets publisher, so `publish` is not offered.
 | `ls`    | List a workspace directory.                               |
 | `write` | Create or overwrite a workspace file.                     |
 | `edit`  | Apply targeted replacements to a workspace file.          |
-| `exec`  | Run a shell command (just-bash) in the worker backend.    |
+| `exec`  | Run a shell command on the selected backend.              |
 
-`exec` runs on a single `"shell"` backend: just-bash in a Dynamic
-Worker loaded through `env.LOADER`. It cold-starts fast, needs no
-container, and covers the usual text tooling (`grep`, `sed`, `awk`,
-`jq`, `sort`, `find`, ...). Its just-bash shell also registers a
-built-in `git` command that forwards to the host workspace's typed git
-API, so `git clone`, `git status`, `git diff`, and `git log` work from
-inside `exec` even though the shell isolate has no public network of
-its own. Only `https://` URLs are supported. The shell cannot run
-`npm`, `node`, `python`, or any binary outside just-bash's built-in
-command set; this example wires no container backend for those. See
-[`docs/05_shell_interface.md`](../../docs/05_shell_interface.md) and
-[`docs/13_git_interface.md`](../../docs/13_git_interface.md).
+`exec` exposes two backend IDs and defaults to `"shell"`:
+
+- `"shell"` — just-bash in a Dynamic Worker loaded through
+  `env.LOADER`. It cold-starts fast and covers usual text tooling
+  (`grep`, `sed`, `awk`, `jq`, `sort`, `find`, ...). It also
+  registers a built-in `git` command that forwards to the host
+  workspace's typed git API, so `git clone`, `git status`, `git diff`,
+  and `git log` work from inside `exec` even though the shell isolate
+  has no public network of its own. Only `https://` URLs are
+  supported.
+- `"container"` — a Cloudflare Container running `wsd` over capnweb,
+  modelled on [`examples/container`](../container). It has full Linux
+  userland, public network, `npm`, `node`, `python`, package managers,
+  test runners, and other real binaries on `$PATH`. It cold-starts
+  more slowly, so use it when the shell backend cannot run the
+  command.
 
 The system prompt tells the model to prefer `read`/`ls` over
-`exec cat`/`exec ls` and `write`/`edit` over shell text munging, and
-to reach for `exec` only when the file tools can't do the job.
+`exec cat`/`exec ls`, `write`/`edit` over shell text munging, and the
+fast `shell` backend before falling through to `container`. See
+[`docs/05_shell_interface.md`](../../docs/05_shell_interface.md),
+[`docs/13_git_interface.md`](../../docs/13_git_interface.md), and
+[`examples/container`](../container).
 
 ## Running it locally
 
-No Docker required. From the repo root:
+Requires Docker so Wrangler can build and run the container backend.
+From the repo root:
 
 ```sh
 npm install
@@ -116,12 +127,16 @@ worker.
 The worker is configured in [`wrangler.jsonc`](./wrangler.jsonc):
 
 - `AI` — Workers AI binding. The agent uses
-  `@cf/moonshotai/kimi-k2.6`; change `MODEL_ID` in `src/agent.ts` to
-  pick another model.
+  `@cf/zai-org/glm-5.2`; change `MODEL_ID` in `src/agent.ts` to pick
+  another model.
 - `LOADER` — Worker Loader binding. The Assistant's Workspace uses it
   to mint the Dynamic Worker that hosts the `exec` shell backend.
-- `Assistant` — the SQLite-backed Durable Object. Each instance owns
-  one Workspace and one Think agent.
+- `containers` — builds [`Dockerfile`](./Dockerfile), which stages the
+  published `wsd` binary into a Debian image with Node 22, npm, npx,
+  git, and FUSE runtime libraries. The Assistant DO owns one
+  container instance when the `container` backend is first used.
+- `Assistant` — the SQLite-backed Durable Object and container class.
+  Each instance owns one Workspace and one Think agent.
 
 No secrets, no external services, no GitHub or R2 configuration.
 
