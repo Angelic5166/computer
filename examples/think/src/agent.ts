@@ -1,194 +1,62 @@
 /**
- * TriageAgent — a Think Durable Object that owns one triage turn.
+ * Assistant — a minimal `@cloudflare/think` chat agent backed by a
+ * `@cloudflare/workspace` VFS.
+ *
+ * Think gives the Durable Object a streaming chat protocol, message
+ * persistence, resumable streams, and the agentic tool loop. This
+ * example keeps the surface as small as possible: one agent, one
+ * Workspace, the shared `@cloudflare/workspace/tools`, and nothing
+ * task-specific. You talk to it from a terminal (see `cli/chat.mjs`)
+ * and it can read, write, and edit files in its workspace and run
+ * shell commands through the worker backend.
  *
  * Wiring:
- *   - super(state, env) hands us Agent + Think machinery (message
- *     store, agentic loop, workflow integration).
- *   - We additionally own a `@cloudflare/workspace.Workspace` backed
- *     by a Cloudflare Container running `wsd`. Mirrors the pattern
- *     in examples/container.
- *   - Think's own `workspace` field expects a string-based
- *     `WorkspaceLike` for its built-in workspace tools. The Workspace
- *     is constructed with `useThink: true` to add that compatibility
- *     surface, and `workspaceBash` is off because
- *     `@cloudflare/workspace/tools` provides the `exec` tool. We also
- *     shadow Think's `read`/`write`/`edit` tool names with the shared
- *     Workspace tools so this example uses the same caps and edit
- *     behavior as package consumers.
- *
- * Phase model:
- *   - The workflow flips `phase` via `setPhase("explore" | "structure")`
- *     before each `step.do` / `step.prompt`. "explore" exposes the
- *     full toolset (read/write/edit/exec/ls/report_update);
- *     "structure" hides every tool so the AI-SDK structured-output
- *     path doesn't fight the agentic loop. The phase is persisted to
- *     durable storage so a recovered turn keeps the right tools.
+ *   - `Think` (via the Durable Object base) hands us the message
+ *     store, agentic loop, and chat protocol.
+ *   - We own a `@cloudflare/workspace.Workspace` whose single backend
+ *     is a `WorkerBackend` — just-bash in a Dynamic Worker loaded
+ *     through `env.LOADER`. No container, no Docker: instant boot and
+ *     broad textual tooling, including a built-in `git` command that
+ *     forwards to the host workspace.
+ *   - `useThink: true` adds the string-based compatibility surface
+ *     Think expects; the cast promotes it from optional to present.
+ *     `workspaceBash` is off because `@cloudflare/workspace/tools`
+ *     provides the `exec` tool.
  */
 
-import type { StepContext } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";
 import {
   type DurableObjectStorageLike,
-  R2Bucket,
   type ThinkWorkspaceCompatibility,
   Workspace,
-  WorkspaceProxy,
   WorkspaceServiceProxy,
   type WorkspaceStub,
 } from "@cloudflare/workspace";
-import {
-  type ArtifactClient,
-  type ArtifactsCLIInput,
-  type ArtifactsCLIResult,
-  createArtifact,
-} from "@cloudflare/workspace/artifacts";
-import { createAssets } from "@cloudflare/workspace/assets";
-import {
-  CloudflareContainerBackend,
-  withWorkspaceContainer,
-} from "@cloudflare/workspace/backends/container";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 import { createAITools } from "@cloudflare/workspace/tools";
 import type { ToolSet } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { createReportUpdateTool } from "./tools/report-update.js";
 
-// Re-export so the runtime can build loopback bindings the DO
-// uses: WorkspaceProxy carries container egress traffic back to
-// this DO (the wsd /ws upgrade lands here), WorkspaceServiceProxy
-// is the Fetcher the worker backend hands into its Dynamic Worker
-// so the in-isolate shell can reach back to the host workspace.
-export { WorkspaceProxy, WorkspaceServiceProxy };
+// Re-export so the runtime can wrap WorkspaceServiceProxy into a
+// loopback Fetcher binding. The WorkerBackend reaches the wrapped
+// class through `ctx.exports.WorkspaceServiceProxy(...)` so the
+// in-isolate shell can call back into the host workspace.
+export { WorkspaceServiceProxy };
 
-/**
- * Per-turn phase. The workflow flips this before each model step:
- *
- *   - "explore":   full toolset (read + write + edit + exec + ls +
- *                 report_update). The agent decides whether to attempt
- *                 a fix or just gather findings, depending on how
- *                 big the change looks. Git operations (clone, diff,
- *                 status) run through `exec` on the shell backend,
- *                 which registers a built-in `git` command that
- *                 forwards to the host's `workspace.git.cli(...)`.
- *   - "structure": no tools at all — used by the workflow's tool-less
- *                 `step.prompt` that coerces the explore turn's text
- *                 into the final zod schema. The structured-output
- *                 AI-SDK path is incompatible with tool calls on
- *                 Workers AI, so we hide them.
- */
-export type TriagePhase = "explore" | "structure";
-
-/**
- * Outcome of `runAgentTurn`. Folded out of `inspectSubmission` so the
- * workflow can decide whether to keep going or bail out gracefully.
- *
- *   - `ok`            normal completion with a non-empty assistant text.
- *   - `out-of-steps`  Think stopped on `stepCountIs(maxSteps)` mid-loop;
- *                     no final text was emitted.
- *   - `failed`        underlying submission ended in error/aborted/
- *                     skipped — typically a context-window overflow
- *                     on Workers AI. `reason` carries the detail.
- */
-export interface AgentTurnResult {
-  status: "ok" | "out-of-steps" | "failed";
-  text: string;
-  /** Empty string on `ok`; populated for `out-of-steps` / `failed`. */
-  reason: string;
-}
-
-export interface ArtifactPublication {
-  repo: string;
-  remote: string;
-  branch: string;
-  shareLink: string;
-}
-
-export interface TriageContext {
-  issueUrl: string;
-  webhookUrl: string;
-  /**
-   * When true, every assistant text part, tool call, and tool result
-   * is POSTed to the webhook as a `{ type: "debug" }` event. Off by
-   * default; the workflow only flips it when the caller asked for
-   * it via the original /issue payload.
-   */
-  debug: boolean;
-}
-
-const CONTEXT_KEY = "triage-context";
-const PHASE_KEY = "triage-phase";
-
-const REPO_ROOT = "/workspace/repo";
 const MODEL_ID = "@cf/moonshotai/kimi-k2.6";
 
-function hasAssetsConfig(env: Env): boolean {
-  return Boolean(
-    env.R2_ACCESS_KEY_ID &&
-      env.R2_SECRET_ACCESS_KEY &&
-      (env.CLOUDFLARE_ACCOUNT_ID || env.R2_ENDPOINT),
-  );
-}
-
-// Identifies this durable object to the backends: both the worker
-// backend's loopback Fetcher and the container's egress table route
-// back to the Workspace by binding name and id.
-function workspaceRef(ctx: DurableObjectState) {
-  return { binding: "TriageAgent", id: ctx.id.toString() };
-}
-
-// Anchor Think's generic before the mixin so withWorkspaceContainer
-// sees a concrete constructor.
-class TriageBase extends Think<Env> {}
-
-export class TriageAgent extends withWorkspaceContainer(TriageBase) {
-  /**
-   * Off. The workflow is the durable layer here — `step.do` and
-   * `step.prompt` replay deterministically through any DO eviction,
-   * and `submitMessages` is keyed by an idempotent submissionId so a
-   * replayed `runAgentTurn` reuses the prior turn's row rather than
-   * starting over. Leaving Think's per-turn chat recovery on top of
-   * that just spams `_chatRecoveryContinue timed out waiting for
-   * stable state` when an upstream call (a Workers AI 502, a Kimi
-   * context overflow) wedges a turn in a non-terminal state — the
-   * recovery loop has nothing useful to do, there is no human
-   * watching transient chat state, and the workflow's own retry is
-   * the right replay boundary for this design.
-   */
-  override chatRecovery = false;
-
-  /** Plenty of budget for a triage + fix + verify loop. */
-  override maxSteps = 40;
-
-  /** We have a dedicated `exec` tool; skip Think's bash. */
+export class Assistant extends Think<Env> {
+  /** We have a dedicated `exec` tool; skip Think's built-in bash. */
   override workspaceBash = false;
 
-  /**
-   * Two backends on a single Workspace:
-   *
-   *   - "shell" (default) is the WorkerBackend, just-bash in a
-   *     Dynamic Worker. Instant boot, broad textual tooling,
-   *     no container. The exec tool reaches this first.
-   *   - "container" is the CloudflareContainerBackend, wsd over
-   *     capnweb. Full Linux userland; the agent falls through
-   *     to it when the shell can't run the command (network
-   *     binaries like `npm install`, native dependencies, ...).
-   *
-   * The first backend in the list is the workspace default;
-   * `shell.exec(command, { backend: "container" })` routes a
-   * specific call elsewhere.
-   */
-  readonly #containerBackend = new CloudflareContainerBackend({
-    id: "container",
-    container: () => this,
-    workspace: workspaceRef(this.ctx),
-  });
+  /** Plenty of budget for a chat turn that reads a few files first. */
+  override maxSteps = 20;
 
   /**
-   * Think's workspace, owned outright. `useThink: true` adds the
-   * string-oriented filesystem methods Think's baseline tools expect
-   * on top of the Workspace surface this class uses directly for
-   * `shell` and `git`; the cast promotes them from optional to
-   * present.
+   * Think's workspace, owned outright. Its single backend is a
+   * Dynamic Worker running just-bash. `useThink: true` adds the
+   * string-based filesystem methods Think's baseline expects; the
+   * cast promotes them from optional to present.
    */
   override workspace = new Workspace({
     storage: this.ctx.storage as unknown as DurableObjectStorageLike,
@@ -196,701 +64,66 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
       new WorkerBackend({
         id: "shell",
         loader: this.env.LOADER,
-        workspace: workspaceRef(this.ctx),
+        workspace: { binding: "Assistant", id: this.ctx.id.toString() },
         ctx: this.ctx,
       }),
-      this.#containerBackend,
     ],
-    // Mount the shared skills bucket at /workspace/.agents. The
-    // R2 keys live under `.agents/` (e.g.
-    // `.agents/skills/triage/SKILL.md`); the prefix is stripped
-    // when computing the in-VFS path, so the agent reads
-    // /workspace/.agents/skills/triage/SKILL.md. Read-only —
-    // writes under the mount root reject with EROFS. Seed the
-    // bucket once with `npm run seed:r2` to upload the bundled
-    // triage skill.
-    mounts: {
-      "/workspace/.agents": R2Bucket(this.env.R2_SKILLS, { prefix: ".agents/" }),
-    },
     useThink: true,
-    ...(hasAssetsConfig(this.env)
-      ? {
-          assets: (ws: Workspace) =>
-            createAssets({
-              ws,
-              bucket: this.env.ASSETS,
-              s3: { bucket: "think-example-assets" },
-              env: this.env as unknown as Record<string, string | undefined>,
-            }),
-        }
-      : {}),
   }) as Workspace & ThinkWorkspaceCompatibility;
 
-  /** Cached context written by the Worker before the workflow runs. */
-  #context: TriageContext | null = null;
-
-  /** Current phase. `null` outside a workflow run. */
-  #phase: TriagePhase | null = null;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.ctx.blockConcurrencyWhile(async () => {
-      this.#context = (await this.ctx.storage.get<TriageContext>(CONTEXT_KEY)) ?? null;
-      this.#phase = (await this.ctx.storage.get<TriagePhase>(PHASE_KEY)) ?? null;
-    });
-  }
-
-  // ── DO container surface ───────────────────────────────────────
-
-  /** Forwarded by the Worker fetch handler for /ws upgrades. */
-  override async fetch(request: Request): Promise<Response> {
-    // Container upgrade path: pass directly to the backend. Anything
-    // else falls through to the framework (Think + Agent inherit
-    // their own request routing from agents-sdk).
-    const url = new URL(request.url);
-    if (url.pathname === "/ws") {
-      return this.#containerBackend.handleFetch(request);
-    }
-    return super.fetch(request);
-  }
-
   /**
-   * Hand out a typed RPC stub to the workspace. This is the accessor
-   * `getWorkspace(stub)` and the worker backend's
-   * WorkspaceServiceProxy dispatch to; the name is private-looking so
-   * callers reach for `getWorkspace` instead of calling it directly.
+   * Hand out a typed RPC stub to the workspace. The worker backend's
+   * WorkspaceServiceProxy dispatches to this so the in-isolate shell
+   * can reach back into the host workspace.
    */
   async __getWorkspaceStub(): Promise<WorkspaceStub> {
     await this.workspace.ready();
     return this.workspace.stub();
   }
 
-  /**
-   * Session-scoped Cloudflare Artifacts client, or null when the
-   * ARTIFACTS binding isn't configured.
-   *
-   * The demo ships with the `artifacts` binding commented out in
-   * wrangler.jsonc, so the binding is absent from the generated
-   * env by default and this returns null. Uncomment the stanza and
-   * re-run `wrangler types` to enable it. When present, every
-   * repository this agent creates is scoped under the agent's own
-   * DO id, so one namespace cleanly isolates one agent's repos from
-   * another's. The session id is the same identity the Workspace
-   * uses, keeping artifact repos and the working tree aligned.
-   *
-   * `Artifacts` is a global type from `@cloudflare/workers-types`;
-   * we read the optional binding off env structurally since the
-   * commented-out stanza keeps it out of the generated `Env`.
-   */
-  #artifacts(): ArtifactClient | null {
-    const binding = (this.env as unknown as { ARTIFACTS?: Artifacts }).ARTIFACTS;
-    if (!binding) return null;
-    return createArtifact(binding, this.ctx.id.toString());
-  }
-
-  /** Worker-backend shell bridge for the in-shell `artifacts` command. */
-  async artifactsCLI(input: ArtifactsCLIInput): Promise<ArtifactsCLIResult> {
-    const artifacts = this.#artifacts();
-    if (!artifacts) {
-      return {
-        stdout: "",
-        stderr: "artifacts: ARTIFACTS binding is not configured\n",
-        exitCode: 1,
-      };
-    }
-    return artifacts.cli(input);
-  }
-
-  /**
-   * Persist the working tree as a session-scoped Artifacts repo and
-   * push the current changes to a review branch. Returns null when
-   * Artifacts is not configured or when there is no patch to publish.
-   */
-  async publishArtifact(params: {
-    repoUrl: string;
-    issueNumber: number;
-    patch: string;
-    commitSubject: string;
-    commitBody: string;
-  }): Promise<ArtifactPublication | null> {
-    const artifacts = this.#artifacts();
-    if (!artifacts || params.patch.trim() === "") return null;
-
-    const repoName = artifactRepoName(params.repoUrl, params.issueNumber);
-    const branch = `triage-${params.issueNumber}-${this.ctx.id.toString().slice(0, 8)}`;
-    const imported = await importOrGetArtifact(artifacts, repoName, params.repoUrl);
-    const token =
-      "token" in imported
-        ? imported.token
-        : (await artifacts.createToken(repoName, "write", 3600)).plaintext;
-    await waitForArtifactReady(artifacts, repoName);
-    const pushRemote = authenticatedArtifactRemote(imported.remote, token);
-
-    const commands = [
-      `git config user.name ${shellQuote("Cloudflare Triage Agent")}`,
-      `git config user.email ${shellQuote("triage@example.invalid")}`,
-      `git branch --force ${shellQuote(branch)}`,
-      `git checkout ${shellQuote(branch)}`,
-      "git add .",
-      `git commit -m ${shellQuote(commitMessage(params.commitSubject, params.commitBody))}`,
-      `git push --force ${shellQuote(pushRemote)} ${shellQuote(`HEAD:${branch}`)}`,
-    ];
-    const result = await this.workspace.shell.exec(commands.join(" && "), {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-      backend: "shell",
-    });
-    const finished = await result.result();
-    if (finished.exitCode !== 0) {
-      const output = (finished.stderr || finished.stdout).replaceAll(
-        pushRemote,
-        "<artifact-remote>",
-      );
-      throw new Error(`artifact push failed with exit code ${finished.exitCode}: ${output}`);
-    }
-
-    return { repo: repoName, remote: imported.remote, branch, shareLink: imported.remote };
-  }
-
-  // ── Workflow control surface ──────────────────────────────────
-
-  /** Called by the Worker once, right before kicking off the workflow. */
-  async setContext(context: TriageContext): Promise<void> {
-    this.#context = context;
-    await this.ctx.storage.put(CONTEXT_KEY, context);
-  }
-
-  async getContext(): Promise<TriageContext | null> {
-    return this.#context;
-  }
-
-  /** Called by the workflow inside a step.do before each step.prompt. */
-  async setPhase(phase: TriagePhase): Promise<void> {
-    this.#phase = phase;
-    await this.ctx.storage.put(PHASE_KEY, phase);
-  }
-
-  /**
-   * Worker → agent entry point. Schedules the workflow and tracks it
-   * in the agent's runtime DB (provided by `Agent.runWorkflow`).
-   */
-  async startTriage(params: { issueUrl: string }): Promise<string> {
-    if (!this.#context) {
-      throw new Error("setContext() must be called before startTriage()");
-    }
-    await this.workspace.ready();
-    return this.runWorkflow("TRIAGE_WORKFLOW", params);
-  }
-
-  /** Used by `notify-done` to POST the terminal payload. */
-  async postWebhook(payload: {
-    message: string;
-    patch?: string;
-    commit?: { subject: string; body: string };
-  }): Promise<void> {
-    const ctx = this.#context;
-    if (!ctx) throw new Error("No triage context bound");
-    await fetch(ctx.webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  }
-
-  /**
-   * Compute a unified diff between HEAD and the working tree, the
-   * same way `git diff HEAD` would. Empty string means the agent
-   * didn't change anything or HEAD can't be resolved (e.g. the agent
-   * never cloned).
-   *
-   * Calls `workspace.git.diff` directly rather than going through
-   * the shell backend's `git` command. The workflow needs the diff
-   * text in-band to build the terminal webhook payload, and the
-   * direct call skips a shell round trip.
-   */
-  async gitDiff(): Promise<string> {
-    await this.workspace.ready();
-    return this.workspace.git.diff({ dir: REPO_ROOT });
-  }
-
-  /**
-   * Run one full Think turn with the model and the current phase's
-   * tools available. Returns the assistant text the model produced
-   * once the turn reaches a terminal state.
-   *
-   * This is the "exploration" half of the two-step pattern from
-   * `docs/think/workflows.md`: do the work with tools here, then have
-   * the workflow follow up with a tool-less `step.prompt` that just
-   * coerces this turn's text into structured output. The two steps
-   * run as separate Workflow steps so a crash between them replays
-   * deterministically.
-   *
-   * Uses `submitMessages` (the same primitive `step.prompt` uses
-   * under the hood) so the turn is durable and idempotent, then polls
-   * `inspectSubmission` until terminal. We don't pass the workflow
-   * metadata that `step.prompt` would attach — we want the result
-   * back in-band, not via a Workflow event.
-   */
-  async runAgentTurn(prompt: string): Promise<AgentTurnResult> {
-    const submission = await this.submitMessages([
-      {
-        id: crypto.randomUUID(),
-        role: "user",
-        parts: [{ type: "text", text: prompt }],
-      },
-    ]);
-    return this.#awaitAssistantText(submission.submissionId);
-  }
-
-  /**
-   * Spin until the submission reaches a terminal status, then walk
-   * `this.messages` back for the most recent assistant text.
-   *
-   * Three terminal shapes get folded into `AgentTurnResult` instead
-   * of being thrown:
-   *
-   *   - `completed` + non-empty text  -> `{ status: "ok", text }`
-   *   - `completed` + empty text       -> `{ status: "out-of-steps", text: "" }`
-   *     (Think stopped on `stepCountIs(maxSteps)` mid-thought.)
-   *   - `error` / `aborted` / `skipped` -> `{ status: "failed", text, reason }`
-   *     (typical cause is Workers AI giving up on a context-window
-   *     overflow; the SSE stream fails to parse, the submission is
-   *     marked errored, and we capture whatever assistant text was
-   *     produced before the cutoff.)
-   *
-   * The workflow checks `status` and short-circuits to `notify-done`
-   * when the budget is exhausted, rather than wedging on a half-empty
-   * structuring step.
-   */
-  async #awaitAssistantText(submissionId: string): Promise<AgentTurnResult> {
-    const POLL_MS = 500;
-    const MAX_MS = 30 * 60 * 1000; // 30 min hard ceiling.
-    const start = Date.now();
-    while (Date.now() - start < MAX_MS) {
-      const insp = await this.inspectSubmission(submissionId);
-      if (!insp) throw new Error(`Submission ${submissionId} vanished`);
-      if (insp.status === "completed") {
-        const text = collectAssistantText(this.messages);
-        if (text.length > 0) return { status: "ok", text, reason: "" };
-        return {
-          status: "out-of-steps",
-          text: "",
-          reason:
-            "Agent completed without emitting a final assistant text — likely hit the maxSteps budget mid-loop.",
-        };
-      }
-      if (insp.status === "error" || insp.status === "aborted" || insp.status === "skipped") {
-        return {
-          status: "failed",
-          text: collectAssistantText(this.messages),
-          reason: `Agent turn ended in status=${insp.status}${insp.error ? `: ${insp.error}` : ""}`,
-        };
-      }
-      await sleep(POLL_MS);
-    }
-    return {
-      status: "failed",
-      text: collectAssistantText(this.messages),
-      reason: `Agent turn timed out after ${MAX_MS}ms`,
-    };
-  }
-
-  // ── Think hooks ───────────────────────────────────────────────
-
   override getModel() {
     return createWorkersAI({ binding: this.env.AI })(MODEL_ID);
   }
 
-  /**
-   * Kimi K2.6 has a 262,144-token context window but the Workers AI
-   * runtime caps generations at a small default (a few thousand
-   * tokens) when `max_tokens` is unset — enough to truncate mid-
-   * tool-call. Bump it to something that lets the model finish a
-   * structured answer or a chain of tool calls.
-   *
-   * 16k is well under the 262k window and leaves plenty of room for
-   * input — the workflow's prior tool calls + the system prompt
-   * commonly run ~30–50k tokens by the time we hit the structure
-   * phase, so the input dominates anyway.
-   */
-  override async beforeTurn() {
-    return { maxOutputTokens: 16384 };
-  }
-
   override getSystemPrompt(): string {
-    const phase = this.#phase ?? "explore";
-    if (phase === "structure") {
-      return [
-        "You are a JSON-shaping assistant. The user message contains a",
-        "prior analysis the agent produced. Reply with structured",
-        "output that matches the schema you were given. Do not invent",
-        "new findings; only restructure what the prior turn already",
-        "said. No tools are available in this phase.",
-      ].join("\n");
-    }
     return [
-      "You are a triage assistant for a GitHub issue.",
+      "You are a helpful assistant with a Cloudflare Workspace as your",
+      "working directory, rooted at /workspace.",
       "",
-      `Repository will be cloned into ${REPO_ROOT}.`,
+      "Tools, in preference order:",
+      "  - read, ls:    inspect the working tree. Prefer these over",
+      "                 `exec cat` / `exec ls`.",
+      "  - write, edit: create and modify files. Prefer these over",
+      "                 `exec sed` / shell heredocs.",
+      "  - exec:        run shell commands (just-bash), including `git`",
+      "                 (clone / status / diff / log). Only https:// git",
+      "                 URLs are supported. Use this for anything the",
+      "                 file tools can't do.",
       "",
-      "Read /workspace/.agents/skills/triage/SKILL.md before you start.",
-      "It captures the playbook you should follow and the exact shape",
-      "of the summary you should produce.",
-      "",
-      "Tools available, in preference order. Reach for `exec` only",
-      "when the dedicated tools can't do what you need:",
-      "  - read, ls:      explore the working tree. Prefer these over",
-      "                   `exec cat` / `exec ls`.",
-      "  - write, edit:   modify files. Prefer these over `exec sed`",
-      "                   / `exec tee` / shell heredocs.",
-      "  - exec:          run shell commands. Use this for `git`",
-      "                   (clone, status, diff, log) on the `shell`",
-      "                   backend, and for the project's own tests /",
-      "                   typecheck / build commands (npm test,",
-      "                   vitest run, cargo test, go test, etc.) on",
-      "                   the `container` backend. Do NOT use it for",
-      "                   file I/O that `read` / `ls` / `write` /",
-      "                   `edit` cover.",
-      "  - report_update: progress updates back to the user.",
-      "",
-      "Git and Artifacts are built into the `shell` backend. Run",
-      `  exec({ command: "git clone https://github.com/<owner>/<repo> ${REPO_ROOT}", backend: "shell" })`,
-      "to populate the working tree, and `git status` / `git diff` /",
-      "`git log` against the same backend to inspect it. The clone",
-      "runs on the host durable object, so it works despite the",
-      "shell isolate having no network of its own; only https://",
-      "URLs are supported. Pass --depth=<N> if you need more history",
-      "than the default depth=1. When the optional ARTIFACTS binding",
-      "is configured, `artifacts repo ...` and `artifacts token ...`",
-      "are also available on the `shell` backend.",
-      "",
-      "Workflow:",
-      `  1. Clone the repo with \`git clone\` via \`exec\` on the`,
-      `     \`shell\` backend into ${REPO_ROOT}.`,
-      "     Read what you need to understand the bug.",
-      "  2. Decide: is this a small, well-scoped change you can confidently",
-      "     make in a handful of edits, with a way to verify it?",
-      "       - YES  -> apply the minimal fix with `write` / `edit`, run the",
-      "                project's own tests / typecheck via `exec` to confirm,",
-      "                then describe the commit you made.",
-      "       - NO   -> do not edit anything. Write up the findings: what",
-      "                the bug is, the files most likely involved, and the",
-      "                concrete next steps a human should take.",
-      "  3. Use `report_update` a few times to keep the user posted. Keep",
-      "     messages terse — one or two sentences. Do NOT say 'DONE'",
-      "     yourself; the workflow emits the terminal message.",
-      "",
-      "When you are happy with the outcome, reply with a short natural-",
-      "language summary covering:",
-      "  - whether you attempted a fix (yes/no) and why",
-      "  - a one-line imperative commit subject (even for findings-only,",
-      "    treat it as 'investigate: …' or 'docs: …' so the workflow can",
-      "    use it as the headline)",
-      "  - one or two paragraphs of context (commit body / findings)",
-      "  - the absolute paths of any files you edited (may be empty)",
-      "  - the verification commands you ran, in order (may be empty)",
-      "  - concrete next steps a human should take (may be empty if the",
-      "    fix is complete)",
-      "",
-      "The workflow will compute the unified diff itself via `git diff",
-      "HEAD`; you do not need to include it.",
+      "Keep replies concise. Use the tools instead of guessing about",
+      "files you can read.",
     ].join("\n");
   }
 
   override getTools(): ToolSet {
-    const ctx = this.#context;
-    if (!ctx) return {} as ToolSet;
-
-    const phase = this.#phase ?? "explore";
-    if (phase === "structure") return {} as ToolSet;
-
-    const ws = this.workspace;
-    const workspaceTools = createAITools({
-      workspace: ws,
-      assets: hasAssetsConfig(this.env),
-      // Per-tool caps. Kimi K2.6 has a 262k context window so we
-      // don't need to be paranoid; the caps are mostly so a
-      // pathological tool call (giant lockfile, multi-MB log) doesn't
-      // burn through the input budget on a single turn. ~32 KiB ≈
-      // ~8k tokens per read.
-      read: { maxBytes: 32 * 1024, maxLines: 800 },
+    return createAITools({
+      workspace: this.workspace,
       shell: {
-        maxBytes: 32 * 1024,
+        defaultBackend: "shell",
         backends: {
           shell: {
             description:
               "just-bash in a Dynamic Worker. Cold-start fast, no " +
-              "container, no public network. Good for cat / grep / " +
-              "sed / awk / jq / head / tail / sort / find / file " +
-              "inspection, quick text transformations, and `git` " +
-              "(clone / status / diff / log / branch / commit) — " +
-              "the shell registers built-in `git` and optional " +
-              "`artifacts` commands that forward to the host " +
-              "workspace, so network-bound subcommands like " +
-              "`git clone` work even though the isolate itself has " +
-              "no public network. Cannot run " +
-              "npm, node, python, or any binary that isn't part of " +
-              "just-bash's built-in command set.",
-          },
-          container: {
-            description:
-              "Cloudflare Container running wsd over capnweb. Full " +
-              "Linux userland: npm, node, the test runner, real " +
-              "binaries on $PATH, public network. Cold start is much " +
-              "slower (container boot); reach for it when the shell " +
-              "backend can't run the command — typically `npm test`, " +
-              "`npm install`, language-specific tooling, or anything " +
-              "that needs a real Linux binary. For git itself, " +
-              "prefer the shell backend.",
+              "container. Good for cat / grep / sed / awk / jq / head / " +
+              "tail / sort / find and for `git` (clone / status / diff / " +
+              "log) — the shell registers a built-in `git` command that " +
+              "forwards to the host workspace, so `git clone` works even " +
+              "though the isolate has no public network of its own. Only " +
+              "https:// URLs are supported. Cannot run npm, node, python, " +
+              "or any binary outside just-bash's built-in command set.",
           },
         },
-        defaultBackend: "shell",
       },
     });
-
-    return {
-      ...workspaceTools,
-      report_update: createReportUpdateTool({ webhookUrl: ctx.webhookUrl }),
-    };
   }
-
-  // ── Debug hooks ────────────────────────────────────────────────
-  //
-  // When `context.debug` is set, every tool call and every step's
-  // assistant text gets POSTed to the webhook as a `type:"debug"`
-  // event so the caller can watch the agent think. The terminal
-  // notify-done payload is unchanged.
-  //
-  // Hooks used:
-  //   afterToolCall  — fires once per tool execution.
-  //   onStepFinish   — fires once per model round (a "step" in
-  //                    AI-SDK terms). This is the right hook for
-  //                    intermediate assistant text: between tool
-  //                    calls the model often produces reasoning
-  //                    or partial text, and onChatResponse only
-  //                    fires at the very end of the whole
-  //                    submission, so it skips everything in
-  //                    between.
-
-  override async afterToolCall(ctx: {
-    toolName: string;
-    toolCallId: string;
-    durationMs: number;
-    success: boolean;
-    output?: unknown;
-    error?: unknown;
-  }): Promise<void> {
-    if (!this.#context?.debug) return;
-    this.#postDebug({
-      kind: "tool-call",
-      tool: ctx.toolName,
-      toolCallId: ctx.toolCallId,
-      durationMs: ctx.durationMs,
-      success: ctx.success,
-      ...(ctx.success ? { output: redact(ctx.output) } : { error: String(ctx.error) }),
-    });
-  }
-
-  override async onStepFinish(ctx: StepContext): Promise<void> {
-    if (!this.#context?.debug) return;
-    const text = typeof ctx.text === "string" ? ctx.text.trim() : "";
-    const reasoning = extractReasoning(ctx);
-    const toolCalls = Array.isArray(ctx.toolCalls)
-      ? ctx.toolCalls.map((c) => c.toolName).filter((n): n is string => typeof n === "string")
-      : [];
-    // Skip empty steps — pure-control steps with no text, no
-    // reasoning, and no tool calls don't help the watcher.
-    if (text.length === 0 && reasoning.length === 0 && toolCalls.length === 0) return;
-    this.#postDebug({
-      kind: "step",
-      text,
-      reasoning,
-      toolCalls,
-      finishReason: typeof ctx.finishReason === "string" ? ctx.finishReason : undefined,
-    });
-  }
-
-  override async onChatResponse(_result: unknown): Promise<void> {
-    if (!this.#context?.debug) return;
-    // Submission boundary marker. Per-step content is emitted by
-    // onStepFinish above; this just lets the CLI know the agent's
-    // current submission has reached a terminal state.
-    this.#postDebug({ kind: "submission-complete" });
-  }
-
-  #postDebug(payload: Record<string, unknown>): void {
-    const ctx = this.#context;
-    if (!ctx) return;
-    // Fire-and-forget through waitUntil so a slow or unreachable
-    // webhook doesn't stall the agent loop. afterToolCall and
-    // onStepFinish are both awaited by Think before the next step
-    // runs; inlining the POST would pin every step on the webhook's
-    // RTT. The trade is no backpressure — fine for a debug stream,
-    // not fine for the terminal notify-done payload (which still
-    // awaits via postWebhook above).
-    const body = JSON.stringify({ type: "debug", phase: this.#phase ?? "", ...payload });
-    this.ctx.waitUntil(
-      fetch(ctx.webhookUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      })
-        .then((res) => {
-          // Drain the body so the connection can be reused; the
-          // CLI returns 204 with no payload, but other receivers
-          // might.
-          void res.body?.cancel();
-        })
-        .catch(() => {
-          // Debug delivery is best-effort — don't crash a turn
-          // over it. The error already happened off the critical
-          // path; nothing useful to log inside the DO.
-        }),
-    );
-  }
-}
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-/**
- * Walk a UIMessage[] back to front, find the most recent assistant
- * message, and join its visible text parts. Reasoning parts and tool
- * parts are dropped — the structuring step / debug stream only care
- * about the model's natural-language response.
- */
-/**
- * Pull a flat reasoning string out of a StepContext. Providers vary:
- * some expose `reasoning` as a single string, some as an array of
- * `{ type: "reasoning", text }` parts, some put the same content on
- * `reasoningText`. We coalesce all three shapes into one string and
- * leave the consumer to decide whether to print it.
- */
-function extractReasoning(ctx: unknown): string {
-  const record = ctx as { reasoning?: unknown; reasoningText?: unknown };
-  const raw = record.reasoning ?? record.reasoningText ?? "";
-  if (typeof raw === "string") return raw.trim();
-  if (Array.isArray(raw)) {
-    return raw
-      .map((r) => {
-        if (typeof r === "string") return r;
-        if (r && typeof r === "object" && typeof (r as { text?: unknown }).text === "string") {
-          return (r as { text: string }).text;
-        }
-        return "";
-      })
-      .join("")
-      .trim();
-  }
-  return "";
-}
-
-function collectAssistantText(
-  messages: ReadonlyArray<{ role: string; parts: Array<{ type: string; text?: string }> }>,
-): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (m.role !== "assistant") continue;
-    const text = m.parts
-      .filter((p) => p.type === "text" && typeof p.text === "string")
-      .map((p) => p.text as string)
-      .join("")
-      .trim();
-    if (text.length > 0) return text;
-  }
-  return "";
-}
-
-async function importOrGetArtifact(
-  artifacts: ArtifactClient,
-  name: string,
-  url: string,
-): Promise<ArtifactsCreateRepoResult | ArtifactsRepoInfo> {
-  try {
-    return await artifacts.import(name, { url });
-  } catch (cause) {
-    if (isArtifactAlreadyExists(cause)) return artifacts.get(name);
-    throw cause;
-  }
-}
-
-async function waitForArtifactReady(artifacts: ArtifactClient, name: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    try {
-      await artifacts.get(name);
-      return;
-    } catch (cause) {
-      lastError = cause;
-      await sleep(500);
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(`artifact repo '${name}' is not ready`);
-}
-
-function isArtifactAlreadyExists(cause: unknown): boolean {
-  return (
-    cause instanceof Error &&
-    cause.name === "ArtifactsError" &&
-    (cause as { code?: unknown }).code === "ALREADY_EXISTS"
-  );
-}
-
-function artifactRepoName(repoUrl: string, issueNumber: number): string {
-  try {
-    const url = new URL(repoUrl);
-    const [owner = "repo", rawRepo = "unknown"] = url.pathname
-      .replace(/\.git$/, "")
-      .split("/")
-      .filter(Boolean);
-    return `triage-${safeArtifactNamePart(owner)}-${safeArtifactNamePart(rawRepo)}-${issueNumber}`;
-  } catch {
-    return `triage-repo-unknown-${issueNumber}`;
-  }
-}
-
-function safeArtifactNamePart(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/__+/g, "-");
-}
-
-function authenticatedArtifactRemote(remote: string, token: string): string {
-  const secret = token.split("?expires=", 1)[0];
-  return `https://x:${encodeURIComponent(secret)}@${remote.slice("https://".length)}`;
-}
-
-function commitMessage(subject: string, body: string): string {
-  const trimmedBody = body.trim();
-  return trimmedBody ? `${subject}\n\n${trimmedBody}` : subject;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Truncate huge tool outputs so a chatty `exec` doesn't blow the
- * webhook receiver up. We don't try to be clever about structure;
- * the debug stream is a development aid, not a transcript.
- */
-function redact(value: unknown): unknown {
-  if (value == null) return value;
-  if (typeof value === "string") {
-    return value.length > 4000
-      ? `${value.slice(0, 4000)}… [truncated, ${value.length - 4000} more chars]`
-      : value;
-  }
-  if (typeof value === "object") {
-    try {
-      const s = JSON.stringify(value);
-      if (s.length <= 4000) return value;
-      return `[object too large for debug: ${s.length} chars]`;
-    } catch {
-      return "[unserialisable]";
-    }
-  }
-  return value;
 }

@@ -3,26 +3,25 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "@cloudflare/think + Workflows triage bot. Worker accepts POST /issue, clones a repo into a container-backed Workspace, triages the issue, attempts a fix, and posts a patch + DONE to a webhook.",
+  "description": "Minimal @cloudflare/think chat agent backed by a @cloudflare/workspace VFS. Talk to it from a terminal with the AI SDK v7 TUI.",
   "scripts": {
-    "dev": "wrangler dev --ip 0.0.0.0",
+    "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
-    "seed:r2": "wrangler r2 object put think-example-skills/.agents/skills/triage/SKILL.md --file ./seed/r2-skills/.agents/skills/triage/SKILL.md --remote",
-    "seed:r2:local": "wrangler r2 object put think-example-skills/.agents/skills/triage/SKILL.md --file ./seed/r2-skills/.agents/skills/triage/SKILL.md --local"
+    "chat": "node ./cli/chat.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "bin": {
-    "triage": "./cli/triage.mjs"
+    "think-chat": "./cli/chat.mjs"
   },
   "dependencies": {
-    "@cloudflare/think": "^0.8.2",
-    "@cloudflare/worker-bundler": "^0.2.0",
+    "@ai-sdk/tui": "^1.0.43",
+    "@cloudflare/think": "^0.15.1",
     "@cloudflare/workspace": "*",
     "@platformatic/vfs": "^0.4.0",
-    "agents": "^0.14.1",
-    "ai": "^6.0.196",
+    "agents": "^0.20.0",
+    "ai": "^7.0.0",
     "isomorphic-git": "^1.38.3",
-    "workers-ai-provider": "^3.1.14",
+    "workers-ai-provider": "^4.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

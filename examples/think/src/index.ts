@@ -1,99 +1,38 @@
 /**
- * Worker entrypoint. Single route:
+ * Worker entrypoint for the minimal Think chat example.
  *
- *   POST /issue   { issue_url, webhook_url }
+ * There is no bespoke HTTP surface here. `routeAgentRequest` forwards
+ * every `/agents/assistant/<name>` request to the Assistant Durable
+ * Object, which speaks Think's WebSocket chat protocol. The terminal
+ * client in `cli/chat.mjs` connects to that protocol with the AI SDK
+ * v7 TUI; the browser could connect to the same DO with `useAgentChat`
+ * from `@cloudflare/think/react`.
  *
- * Derives a stable agent name from the issue URL, binds the webhook
- * URL into the agent, kicks off `TRIAGE_WORKFLOW`, and returns
- * `{ workflowId, agentName }`.
- *
- * The TriageAgent and TriageWorkflow classes are re-exported so the
- * runtime can find them by class name (DO + Workflow bindings in
- * wrangler.jsonc).
- *
- * WorkspaceProxy and WorkspaceServiceProxy are also re-exported so
- * the runtime can build the loopback bindings the backends use:
- * WorkspaceProxy carries container egress traffic back to the
- * TriageAgent, WorkspaceServiceProxy is the Fetcher the worker
- * backend hands into its Dynamic Worker so the in-isolate shell
- * can reach back to the host workspace.
+ * The Assistant and WorkspaceServiceProxy classes are re-exported so
+ * the runtime can resolve them by name: Assistant is the DO binding,
+ * WorkspaceServiceProxy is the loopback Fetcher the worker backend
+ * hands into its Dynamic Worker so the in-isolate shell can reach back
+ * into the host workspace.
  */
 
-import { getAgentByName } from "agents";
-import { TriageAgent, WorkspaceProxy, WorkspaceServiceProxy } from "./agent.js";
-import { TriageWorkflow } from "./workflow.js";
+import { routeAgentRequest } from "agents";
+import { Assistant, WorkspaceServiceProxy } from "./agent.js";
 
-export { TriageAgent, TriageWorkflow, WorkspaceProxy, WorkspaceServiceProxy };
-
-interface IssueRequest {
-  issue_url?: unknown;
-  webhook_url?: unknown;
-  /** Optional. When true, every tool call and assistant text is mirrored to the webhook as `{ type: "debug", … }`. */
-  debug?: unknown;
-}
+export { Assistant, WorkspaceServiceProxy };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
-
-    if (request.method === "POST" && url.pathname === "/issue") {
-      let body: IssueRequest;
-      try {
-        body = (await request.json()) as IssueRequest;
-      } catch {
-        return json({ error: "Body must be JSON" }, 400);
-      }
-      const issueUrl = typeof body.issue_url === "string" ? body.issue_url : null;
-      const webhookUrl = typeof body.webhook_url === "string" ? body.webhook_url : null;
-      const debug = body.debug === true;
-      if (!issueUrl || !webhookUrl) {
-        return json({ error: "Required: issue_url, webhook_url (both strings)" }, 400);
-      }
-      const agentName = agentNameForIssue(issueUrl);
-      const agent = await getAgentByName<Env, TriageAgent>(env.TriageAgent, agentName);
-      await agent.setContext({ issueUrl, webhookUrl, debug });
-      const workflowId = await agent.startTriage({ issueUrl });
-      return json({ agentName, workflowId }, 202);
-    }
-
-    if (url.pathname === "/" || url.pathname === "") {
-      return new Response(
+    return (
+      (await routeAgentRequest(request, env)) ??
+      new Response(
         [
-          "think example",
+          "minimal think chat example",
           "",
-          "  POST /issue   { issue_url, webhook_url, debug? }",
-          "",
-          "    Kicks off a TriageWorkflow that clones the repo,",
-          "    triages the issue, attempts a fix, and POSTs progress",
-          "    + a final DONE payload to webhook_url.",
+          "  Connect a terminal client with `npm run chat`, or point any",
+          "  Think/agents chat client at /agents/assistant/<name>.",
         ].join("\n"),
         { headers: { "content-type": "text/plain" } },
-      );
-    }
-
-    return new Response("not found", { status: 404 });
+      )
+    );
   },
 } satisfies ExportedHandler<Env>;
-
-/**
- * Map an issue URL to a deterministic agent name so repeated calls
- * against the same issue reuse the same DO + workspace. Strips
- * everything except `owner/repo/issues/N`.
- */
-function agentNameForIssue(issueUrl: string): string {
-  const match = issueUrl.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
-  if (!match) {
-    // Fall back to a hash-free dump of the URL so the user still gets
-    // a stable name. Strips anything not safe for a DO name.
-    return issueUrl.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 64);
-  }
-  const [, owner, repo, num] = match;
-  return `${owner}-${repo}-${num}`;
-}
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body, null, 2), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
