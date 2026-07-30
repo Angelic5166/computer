@@ -242,6 +242,105 @@ A workspace with two backends that both write into
 [`docs/05_shell_interface.md`](../../docs/05_shell_interface.md)
 for the caveat.
 
+## Durable pending-sync retries
+
+A command can finish after changing backend files while its post-command pull
+fails. The command result reports `sync.status: "pending"`. If you configure a
+`SyncRetryScheduler`, Workspace also writes one durable retry intent for that
+backend. The library does not use an in-memory timer and cannot own the host
+Durable Object's alarm.
+
+The scheduler contract contains only values that a host can persist:
+
+```ts
+import {
+  type SyncRetryIntent,
+  type SyncRetryScheduler,
+  Workspace,
+} from "@cloudflare/workspace";
+
+const RETRY_PREFIX = "workspace:sync-retry:";
+
+class DurableObjectRetryScheduler implements SyncRetryScheduler {
+  constructor(private readonly state: DurableObjectState) {}
+
+  async get(backend: string): Promise<SyncRetryIntent | undefined> {
+    return this.state.storage.get(`${RETRY_PREFIX}${backend}`);
+  }
+
+  async schedule(intent: SyncRetryIntent): Promise<void> {
+    // schedule replaces the backend's existing intent, so repeated
+    // failures coalesce instead of creating an alarm queue.
+    await this.state.storage.put(`${RETRY_PREFIX}${intent.backend}`, intent);
+
+    const intents = await this.state.storage.list<SyncRetryIntent>({
+      prefix: RETRY_PREFIX,
+    });
+    const next = Math.min(...[...intents.values()].map((item) => item.notBefore));
+    await this.state.storage.setAlarm(next);
+  }
+
+  async clear(backend: string): Promise<void> {
+    await this.state.storage.delete(`${RETRY_PREFIX}${backend}`);
+  }
+}
+```
+
+Pass the scheduler to `Workspace` and invoke `retryPendingSync` from the host's
+alarm or another durable scheduler:
+
+```ts
+export class WorkspaceHost extends DurableObject<Env> {
+  readonly scheduler = new DurableObjectRetryScheduler(this.ctx);
+  readonly workspace = new Workspace({
+    storage: this.ctx.storage,
+    backends: [/* ... */],
+    retryScheduler: this.scheduler,
+    retry: {
+      initialDelayMs: 1_000,
+      maxDelayMs: 60_000,
+      maxAttempts: 5,
+    },
+  });
+
+  async alarm(): Promise<void> {
+    const intents = await this.ctx.storage.list<SyncRetryIntent>({
+      prefix: RETRY_PREFIX,
+    });
+    const now = Date.now();
+    for (const intent of intents.values()) {
+      if (intent.notBefore <= now) {
+        const result = await this.workspace.retryPendingSync(intent.backend);
+        // An exhausted backend keeps its final intent in storage with a
+        // past-due notBefore. Clear it here so it stops driving the alarm;
+        // otherwise the wake-up fires immediately and forever. Inspect or
+        // alert before clearing if you need to surface the exhaustion.
+        if (result.status === "exhausted") {
+          await this.scheduler.clear(intent.backend);
+        }
+      }
+    }
+
+    const remaining = await this.ctx.storage.list<SyncRetryIntent>({
+      prefix: RETRY_PREFIX,
+    });
+    if (remaining.size > 0) {
+      await this.ctx.storage.setAlarm(
+        Math.min(...[...remaining.values()].map((item) => item.notBefore)),
+      );
+    }
+  }
+}
+```
+
+`retryPendingSync(backend?)` enters the same per-backend FIFO as commands,
+`push`, and `pull`. It resumes `pullOnce` from the cursor already persisted in
+SQLite. Success clears the intent. Failure replaces it with the next bounded
+exponential-backoff attempt. Once `maxAttempts` fails, the final intent stays
+in storage and the method returns `status: "exhausted"`; the host can inspect,
+alert on, or explicitly clear it. Calling the method with no pending intent
+returns `status: "idle"`.
+
 ## Worker-side consumption
 
 ```ts
@@ -254,7 +353,10 @@ export default {
 
     await ws.fs.writeFile("/notes.md", "hello");
     using handle = await ws.shell.exec("ls /workspace", { encoding: "utf8" });
-    const { exitCode, stdout } = await handle.result();
+    const { exitCode, stdout, sync } = await handle.result();
+    if (sync.status === "pending") {
+      console.warn("command completed before its filesystem changes synced", sync.error);
+    }
 
     return new Response(stdout, { status: exitCode === 0 ? 200 : 500 });
   },
@@ -357,8 +459,10 @@ The span names the package emits today:
   `WorkspaceStub`. Contains `workspace.sync.push`,
   `workspace.shell.exec.spawn`, and `workspace.sync.pull` as nested
   children. Tagged with `workspace.shell.exit_code`,
-  `workspace.shell.pushed`, `workspace.shell.pulled`, and
-  `workspace.shell.skipped`.
+  `workspace.shell.pushed`, `workspace.shell.pulled`,
+  `workspace.shell.skipped`, and `workspace.shell.sync.status`. Pending
+  pulls also set `workspace.shell.sync.error` to the same bounded,
+  credential-redacted error returned in `ExecResult.sync`.
 - `workspace.fs.<op>` — one per filesystem call routed through the
   stub (`readFile`, `writeFile`, `stat`, `readdir`, `find`, `ls`,
   `grep`, `mkdir`, `rm`). Tagged with `workspace.fs.path` and, where

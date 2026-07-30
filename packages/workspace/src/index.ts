@@ -61,6 +61,7 @@ export type {
   ExecHandle,
   ExecOptions,
   ExecResult,
+  ExecSyncResult,
   GetExecOptions,
   KillSignal,
   WorkspaceExecEvent,
@@ -82,4 +83,11 @@ export {
   type WorkspaceStubHost,
   withWorkspace,
 } from "./with-workspace.js";
-export { Workspace, type WorkspaceOptions } from "./workspace.js";
+export {
+  type SyncRetryIntent,
+  type SyncRetryOptions,
+  type SyncRetryScheduler,
+  Workspace,
+  type WorkspaceOptions,
+  type WorkspaceRetryPendingSyncResult,
+} from "./workspace.js";
