@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import { z } from "zod";
 import type { AssetsClient } from "../assets/index.js";
 
@@ -13,7 +13,9 @@ export interface PublishToolOptions {
 
 const DEFAULT_EXPIRY_MS = 60 * 60 * 1000;
 
-export function createPublishTool(options: PublishToolOptions) {
+export function createPublishTool(
+  options: PublishToolOptions,
+): Tool<{ path: string; expiresAfterMs?: number }> {
   const assets = options.workspace.assets;
   if (!assets) {
     throw new Error("createPublishTool: workspace.assets is not configured");

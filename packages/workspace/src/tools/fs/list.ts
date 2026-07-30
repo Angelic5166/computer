@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import { z } from "zod";
 
 export interface ListWorkspaceLike {
@@ -15,7 +15,7 @@ const inputSchema = z.object({
   path: z.string().describe("Absolute directory path to list, e.g. /workspace/src."),
 });
 
-export function createListTool(options: ListToolOptions) {
+export function createListTool(options: ListToolOptions): Tool<z.infer<typeof inputSchema>> {
   return tool({
     description:
       "List entries in a workspace directory. Returns each entry name and whether it is a file or directory.",

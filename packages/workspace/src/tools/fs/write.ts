@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import { z } from "zod";
 import type { FileStore } from "./types.js";
 
@@ -18,7 +18,7 @@ const inputSchema = z.object({
   content: z.string().describe("File content"),
 });
 
-export function createWriteTool(options: WriteToolOptions) {
+export function createWriteTool(options: WriteToolOptions): Tool<z.infer<typeof inputSchema>> {
   const { store } = options;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 

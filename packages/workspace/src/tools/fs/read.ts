@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import { z } from "zod";
 import type { FileStore } from "./types.js";
 
@@ -53,7 +53,7 @@ const _enc = new TextEncoder();
 function utf8ByteLength(s: string): number {
   return _enc.encode(s).length;
 }
-export function createReadTool(options: ReadToolOptions) {
+export function createReadTool(options: ReadToolOptions): Tool<z.infer<typeof inputSchema>> {
   const { store } = options;
   const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;

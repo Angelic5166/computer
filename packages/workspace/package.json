@@ -72,7 +72,7 @@
   },
   "peerDependencies": {
     "@platformatic/vfs": "*",
-    "ai": "^6.0.196",
+    "ai": "^6.0.196 || ^7.0.0",
     "isomorphic-git": "^1.27.0",
     "zod": "^4.4.3"
   },
@@ -96,7 +96,7 @@
     "@cloudflare/workers-types": "^4.20260616.1",
     "@cloudflare/workspace-rpc": "*",
     "@platformatic/vfs": "^0.4.0",
-    "ai": "^6.0.196",
+    "ai": "^7.0.0",
     "diff": "^9.0.0",
     "esbuild": "^0.28.1",
     "isomorphic-git": "^1.38.3",

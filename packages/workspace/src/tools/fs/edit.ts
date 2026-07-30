@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import { z } from "zod";
 import {
   applyEditsToNormalizedContent,
@@ -90,7 +90,7 @@ async function withFileLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function createEditTool(options: EditToolOptions) {
+export function createEditTool(options: EditToolOptions): Tool<z.infer<typeof inputSchema>> {
   const { store } = options;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 

@@ -1,4 +1,4 @@
-import { tool } from "ai";
+import { type Tool, tool } from "ai";
 import { z } from "zod";
 
 export interface ExecWorkspaceLike {
@@ -29,7 +29,9 @@ export interface ExecToolOptions {
 
 const DEFAULT_MAX_BYTES = 64 * 1024;
 
-export function createExecTool(options: ExecToolOptions) {
+export function createExecTool(
+  options: ExecToolOptions,
+): Tool<{ command: string; cwd?: string; backend?: string }> {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const backendIds = Object.keys(options.backends);
   if (backendIds.length === 0) {
