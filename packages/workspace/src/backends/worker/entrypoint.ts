@@ -162,6 +162,15 @@ export class ShellWorker<
           python: this.shellOptions.python,
           javascript: this.shellOptions.javascript,
           customCommands,
+          // just-bash's in-process DefenseInDepthBox activates by
+          // registering ESM loader hooks through node:module's
+          // registerHooks. workerd exposes that method but throws
+          // "not implemented", so activation aborts and every
+          // command fails. The box is redundant here anyway: the
+          // shell already runs inside an isolated Dynamic Worker,
+          // which is the real boundary. Opt out so the interpreter
+          // runs on the workerd target.
+          defenseInDepth: { enabled: false },
         });
         result = await bash.exec(input.command, { cwd });
       }
