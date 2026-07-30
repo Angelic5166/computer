@@ -87,6 +87,7 @@ export {
   type SyncRetryIntent,
   type SyncRetryOptions,
   type SyncRetryScheduler,
+  type ThinkWorkspaceCompatibility,
   Workspace,
   type WorkspaceOptions,
   type WorkspaceRetryPendingSyncResult,

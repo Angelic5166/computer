@@ -16,7 +16,7 @@
  * WorkspaceProxy carries container egress traffic back to the
  * TriageAgent, WorkspaceServiceProxy is the Fetcher the worker
  * backend hands into its Dynamic Worker so the in-isolate shell
- * can reach back to getWorkspace().
+ * can reach back to the host workspace.
  */
 
 import { getAgentByName } from "agents";

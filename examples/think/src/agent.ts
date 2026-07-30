@@ -25,11 +25,12 @@
  *     durable storage so a recovered turn keeps the right tools.
  */
 
-import type { StepContext, WorkspaceLike as ThinkWorkspaceLike } from "@cloudflare/think";
+import type { StepContext } from "@cloudflare/think";
 import { Think } from "@cloudflare/think";
 import {
   type DurableObjectStorageLike,
   R2Bucket,
+  type ThinkWorkspaceCompatibility,
   Workspace,
   WorkspaceProxy,
   WorkspaceServiceProxy,
@@ -56,7 +57,7 @@ import { createReportUpdateTool } from "./tools/report-update.js";
 // uses: WorkspaceProxy carries container egress traffic back to
 // this DO (the wsd /ws upgrade lands here), WorkspaceServiceProxy
 // is the Fetcher the worker backend hands into its Dynamic Worker
-// so the in-isolate shell can reach back to getWorkspace().
+// so the in-isolate shell can reach back to the host workspace.
 export { WorkspaceProxy, WorkspaceServiceProxy };
 
 /**
@@ -128,6 +129,13 @@ function hasAssetsConfig(env: Env): boolean {
   );
 }
 
+// Identifies this durable object to the backends: both the worker
+// backend's loopback Fetcher and the container's egress table route
+// back to the Workspace by binding name and id.
+function workspaceRef(ctx: DurableObjectState) {
+  return { binding: "TriageAgent", id: ctx.id.toString() };
+}
+
 // Anchor Think's generic before the mixin so withWorkspaceContainer
 // sees a concrete constructor.
 class TriageBase extends Think<Env> {}
@@ -169,8 +177,54 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
    * `shell.exec(command, { backend: "container" })` routes a
    * specific call elsewhere.
    */
-  readonly #containerBackend: CloudflareContainerBackend;
-  readonly #workspaceFs: Workspace;
+  readonly #containerBackend = new CloudflareContainerBackend({
+    id: "container",
+    container: () => this,
+    workspace: workspaceRef(this.ctx),
+  });
+
+  /**
+   * Think's workspace, owned outright. `useThink: true` adds the
+   * string-oriented filesystem methods Think's baseline tools expect
+   * on top of the Workspace surface this class uses directly for
+   * `shell` and `git`; the cast promotes them from optional to
+   * present.
+   */
+  override workspace = new Workspace({
+    storage: this.ctx.storage as unknown as DurableObjectStorageLike,
+    backends: [
+      new WorkerBackend({
+        id: "shell",
+        loader: this.env.LOADER,
+        workspace: workspaceRef(this.ctx),
+        ctx: this.ctx,
+      }),
+      this.#containerBackend,
+    ],
+    // Mount the shared skills bucket at /workspace/.agents. The
+    // R2 keys live under `.agents/` (e.g.
+    // `.agents/skills/triage/SKILL.md`); the prefix is stripped
+    // when computing the in-VFS path, so the agent reads
+    // /workspace/.agents/skills/triage/SKILL.md. Read-only —
+    // writes under the mount root reject with EROFS. Seed the
+    // bucket once with `npm run seed:r2` to upload the bundled
+    // triage skill.
+    mounts: {
+      "/workspace/.agents": R2Bucket(this.env.R2_SKILLS, { prefix: ".agents/" }),
+    },
+    useThink: true,
+    ...(hasAssetsConfig(this.env)
+      ? {
+          assets: (ws: Workspace) =>
+            createAssets({
+              ws,
+              bucket: this.env.ASSETS,
+              s3: { bucket: "think-example-assets" },
+              env: this.env as unknown as Record<string, string | undefined>,
+            }),
+        }
+      : {}),
+  }) as Workspace & ThinkWorkspaceCompatibility;
 
   /** Cached context written by the Worker before the workflow runs. */
   #context: TriageContext | null = null;
@@ -180,54 +234,6 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    const workspaceRef = { binding: "TriageAgent", id: ctx.id.toString() };
-    this.#containerBackend = new CloudflareContainerBackend({
-      id: "container",
-      container: () => this,
-      workspace: workspaceRef,
-    });
-    this.#workspaceFs = new Workspace({
-      storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [
-        new WorkerBackend({
-          id: "shell",
-          loader: env.LOADER,
-          workspace: workspaceRef,
-          ctx,
-        }),
-        this.#containerBackend,
-      ],
-      // Mount the shared skills bucket at /workspace/.agents. The
-      // R2 keys live under `.agents/` (e.g.
-      // `.agents/skills/triage/SKILL.md`); the prefix is stripped
-      // when computing the in-VFS path, so the agent reads
-      // /workspace/.agents/skills/triage/SKILL.md. Read-only —
-      // writes under the mount root reject with EROFS. Seed the
-      // bucket once with `npm run seed:r2` to upload the bundled
-      // triage skill.
-      mounts: {
-        "/workspace/.agents": R2Bucket(env.R2_SKILLS, { prefix: ".agents/" }),
-      },
-      useThink: true,
-      ...(hasAssetsConfig(env)
-        ? {
-            assets: (ws: Workspace) =>
-              createAssets({
-                ws,
-                bucket: env.ASSETS,
-                s3: { bucket: "think-example-assets" },
-                env: env as unknown as Record<string, string | undefined>,
-              }),
-          }
-        : {}),
-    });
-
-    // Hand Think the compatibility methods added by useThink, so the
-    // baseline read/write/edit tools have something to delegate to —
-    // even though we shadow most of those names below. Think's
-    // built-in tools land on the default backend (the shell).
-    this.workspace = this.#workspaceFs as unknown as ThinkWorkspaceLike;
-
     this.ctx.blockConcurrencyWhile(async () => {
       this.#context = (await this.ctx.storage.get<TriageContext>(CONTEXT_KEY)) ?? null;
       this.#phase = (await this.ctx.storage.get<TriagePhase>(PHASE_KEY)) ?? null;
@@ -248,10 +254,15 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     return super.fetch(request);
   }
 
-  /** Hand out a typed RPC stub to the workspace if a caller wants one. */
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspaceFs.ready();
-    return this.#workspaceFs.stub();
+  /**
+   * Hand out a typed RPC stub to the workspace. This is the accessor
+   * `getWorkspace(stub)` and the worker backend's
+   * WorkspaceServiceProxy dispatch to; the name is private-looking so
+   * callers reach for `getWorkspace` instead of calling it directly.
+   */
+  async __getWorkspaceStub(): Promise<WorkspaceStub> {
+    await this.workspace.ready();
+    return this.workspace.stub();
   }
 
   /**
@@ -324,7 +335,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
       `git commit -m ${shellQuote(commitMessage(params.commitSubject, params.commitBody))}`,
       `git push --force ${shellQuote(pushRemote)} ${shellQuote(`HEAD:${branch}`)}`,
     ];
-    const result = await this.#workspaceFs.shell.exec(commands.join(" && "), {
+    const result = await this.workspace.shell.exec(commands.join(" && "), {
       cwd: REPO_ROOT,
       encoding: "utf8",
       backend: "shell",
@@ -367,7 +378,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     if (!this.#context) {
       throw new Error("setContext() must be called before startTriage()");
     }
-    await this.#workspaceFs.ready();
+    await this.workspace.ready();
     return this.runWorkflow("TRIAGE_WORKFLOW", params);
   }
 
@@ -398,8 +409,8 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
    * direct call skips a shell round trip.
    */
   async gitDiff(): Promise<string> {
-    await this.#workspaceFs.ready();
-    return this.#workspaceFs.git.diff({ dir: REPO_ROOT });
+    await this.workspace.ready();
+    return this.workspace.git.diff({ dir: REPO_ROOT });
   }
 
   /**
@@ -593,7 +604,7 @@ export class TriageAgent extends withWorkspaceContainer(TriageBase) {
     const phase = this.#phase ?? "explore";
     if (phase === "structure") return {} as ToolSet;
 
-    const ws = this.#workspaceFs;
+    const ws = this.workspace;
     const workspaceTools = createAITools({
       workspace: ws,
       assets: hasAssetsConfig(this.env),
