@@ -22,7 +22,7 @@
 //                                              (ShellWorker)
 //                                                    │
 //                                                    │ env.HOST.get(id)
-//                                                    │   .getWorkspace()
+//                                                    │   getWorkspace(stub)
 //                                                    ▼
 //                                       back to ContainerExample DO
 
@@ -30,10 +30,10 @@ import { DurableObject } from "cloudflare:workers";
 
 import {
   type DurableObjectStorageLike,
+  getWorkspace,
   R2Bucket,
-  Workspace,
   WorkspaceServiceProxy,
-  type WorkspaceStub,
+  withWorkspace,
 } from "@cloudflare/workspace";
 import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 
@@ -43,43 +43,34 @@ import { WorkerBackend } from "@cloudflare/workspace/backends/worker";
 // WorkerBackend below.
 export { WorkspaceServiceProxy };
 
-export class ContainerExample extends DurableObject<Env> {
-  readonly #workspace: Workspace;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.#workspace = new Workspace({
-      // ctx.storage.sql.exec returns a narrower row type than
-      // DurableObjectStorageLike declares; the runtime shape
-      // matches. Cast through unknown to bypass invariance.
-      storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [
-        new WorkerBackend({
-          loader: env.LOADER,
-          workspace: { binding: "ContainerExample", id: ctx.id.toString() },
-          ctx,
-        }),
-      ],
-      // Mount the Bucket binding at /workspace/r2. Seed it with
-      // `npm run seed:r2` so the first read returns "hello world".
-      // The bucket is read-only; writes under /workspace/r2
-      // reject with EROFS.
-      mounts: {
-        "/workspace/r2": R2Bucket(env.Bucket),
-      },
-    });
-  }
-
-  // Returns an RpcTarget that the caller (this Worker, or another
-  // DO) uses to reach the Workspace. Methods on the returned stub
-  // round-trip into this DO over Workers RPC. The Dynamic Worker
-  // also reaches this same method, by id, through its env.HOST
-  // binding.
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspace.ready();
-    return this.#workspace.stub();
-  }
-}
+// The mixin owns the Workspace and installs the prototype accessor
+// `getWorkspace` dispatches to: callers in this Worker reach it with
+// getWorkspace(stub), and the Dynamic Worker's env.HOST binding lands
+// on the same door by id. The options callback runs after super(...),
+// so it can read self.ctx / self.env.
+export class ContainerExample extends withWorkspace(class extends DurableObject<Env> {}, (self) => {
+  const { ctx, env } = self as unknown as { ctx: DurableObjectState; env: Env };
+  return {
+    // ctx.storage.sql.exec returns a narrower row type than
+    // DurableObjectStorageLike declares; the runtime shape
+    // matches. Cast through unknown to bypass invariance.
+    storage: ctx.storage as unknown as DurableObjectStorageLike,
+    backends: [
+      new WorkerBackend({
+        loader: env.LOADER,
+        workspace: { binding: "ContainerExample", id: ctx.id.toString() },
+        ctx,
+      }),
+    ],
+    // Mount the Bucket binding at /workspace/r2. Seed it with
+    // `npm run seed:r2` so the first read returns "hello world".
+    // The bucket is read-only; writes under /workspace/r2
+    // reject with EROFS.
+    mounts: {
+      "/workspace/r2": R2Bucket(env.Bucket),
+    },
+  };
+}) {}
 
 // ---------------------------------------------------------------
 // Worker HTTP surface (mirrors examples/container)
@@ -144,7 +135,9 @@ async function handleFile(
   path: string,
 ): Promise<Response> {
   const stub = env.ContainerExample.get(env.ContainerExample.idFromName(name));
-  const ws = await stub.getWorkspace();
+  // `wrangler types` doesn't surface the accessor the withWorkspace
+  // mixin installs, so cast at the boundary.
+  const ws = await getWorkspace(stub as unknown as Parameters<typeof getWorkspace>[0]);
 
   if (request.method === "PUT") {
     const body = new Uint8Array(await request.arrayBuffer());
@@ -194,7 +187,7 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   }
 
   const stub = env.ContainerExample.get(env.ContainerExample.idFromName(name));
-  const ws = await stub.getWorkspace();
+  const ws = await getWorkspace(stub as unknown as Parameters<typeof getWorkspace>[0]);
   try {
     const handle = await ws.shell.exec(command, { cwd: body.cwd, encoding: "utf8" });
     const result = await handle.result();

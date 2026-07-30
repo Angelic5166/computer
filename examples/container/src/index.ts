@@ -21,10 +21,11 @@ import { DurableObject, tracing } from "cloudflare:workers";
 
 import {
   type DurableObjectStorageLike,
+  getWorkspace,
   R2Bucket,
-  Workspace,
+  type WorkspaceOptions,
   WorkspaceProxy,
-  type WorkspaceStub,
+  withWorkspace,
 } from "@cloudflare/workspace";
 import {
   CloudflareContainerBackend,
@@ -43,56 +44,57 @@ export { WorkspaceProxy };
 // ---------------------------------------------------------------
 // Durable Object: owns one Workspace backed by one container.
 // ---------------------------------------------------------------
-export class ContainerExample extends withWorkspaceContainer(class extends DurableObject<Env> {}) {
-  readonly #backend: CloudflareContainerBackend;
-  readonly #workspace: Workspace;
+// The container half of the DO. The backend lives here rather than on
+// ContainerExample because withWorkspace's options callback needs it
+// while constructing the Workspace: base-class fields are initialized
+// by the time the callback runs, subclass fields are not.
+class ContainerBase extends withWorkspaceContainer(class extends DurableObject<Env> {}) {
+  readonly backend = new CloudflareContainerBackend({
+    container: () => this,
+    workspace: { binding: "ContainerExample", id: this.ctx.id.toString() },
+  });
+}
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.#backend = new CloudflareContainerBackend({
-      container: () => this,
-      workspace: { binding: "ContainerExample", id: ctx.id.toString() },
-    });
-    this.#workspace = new Workspace({
-      // ctx.storage.sql.exec returns a narrower row type than
-      // DurableObjectStorageLike declares; the runtime shape
-      // matches. Cast through unknown to bypass invariance.
-      storage: ctx.storage as unknown as DurableObjectStorageLike,
-      backends: [this.#backend],
-      // Mount the Bucket binding at /workspace/r2. Seed it with
-      // `npm run seed:r2` (uploads ./seed/data/hello.txt) so the
-      // first read returns "hello world". The bucket is read-only;
-      // writes through Workspace.fs under /workspace/r2 reject
-      // with EROFS.
-      mounts: {
-        "/workspace/r2": R2Bucket(env.Bucket),
-      },
-      // Route every workspace operation through the Cloudflare
-      // runtime's user-tracing surface. The runtime owns the span
-      // lifecycle; the observer is a thin facade that forwards seed
-      // attributes and a `setAttribute` callback. With
-      // `observability.traces.enabled = true` in wrangler.jsonc, the
-      // spans show up in the Workers Observability dashboard
-      // alongside the runtime's automatic fetch and binding spans.
-      observer: createCloudflareObserver({ tracing }),
-    });
-  }
+// Named, with an explicit return type: an inline callback would make
+// the class's own base expression part of its inferred type.
+// DurableObject keeps ctx and env protected, so read them through a
+// cast the way the mixin's own docs do.
+function workspaceOptions(self: InstanceType<typeof ContainerBase>): WorkspaceOptions {
+  const { ctx, env } = self as unknown as { ctx: DurableObjectState; env: Env };
+  return {
+    // ctx.storage.sql.exec returns a narrower row type than
+    // DurableObjectStorageLike declares; the runtime shape
+    // matches. Cast through unknown to bypass invariance.
+    storage: ctx.storage as unknown as DurableObjectStorageLike,
+    backends: [self.backend],
+    // Mount the Bucket binding at /workspace/r2. Seed it with
+    // `npm run seed:r2` (uploads ./seed/data/hello.txt) so the
+    // first read returns "hello world". The bucket is read-only;
+    // writes through Workspace.fs under /workspace/r2 reject
+    // with EROFS.
+    mounts: {
+      "/workspace/r2": R2Bucket(env.Bucket),
+    },
+    // Route every workspace operation through the Cloudflare
+    // runtime's user-tracing surface. The runtime owns the span
+    // lifecycle; the observer is a thin facade that forwards seed
+    // attributes and a `setAttribute` callback. With
+    // `observability.traces.enabled = true` in wrangler.jsonc, the
+    // spans show up in the Workers Observability dashboard
+    // alongside the runtime's automatic fetch and binding spans.
+    observer: createCloudflareObserver({ tracing }),
+  };
+}
 
-  // ---- Worker-facing RPC surface --------------------------------
-
-  // Returns an RpcTarget that the caller (Worker or another DO)
-  // uses to reach the Workspace. Methods on the returned stub
-  // round-trip back into this DO over Workers RPC; the actual
-  // SyncRPC + ShellRPC traffic stays on the wsd ↔ DO capnweb wire.
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspace.ready();
-    return this.#workspace.stub();
-  }
-
+// withWorkspace owns the Workspace and installs the prototype
+// accessor `getWorkspace` dispatches to. Methods on the client it
+// hands back round-trip into this DO; the actual SyncRPC + ShellRPC
+// traffic stays on the wsd ↔ DO capnweb wire.
+export class ContainerExample extends withWorkspace(ContainerBase, workspaceOptions) {
   // ---- WebSocket: wsd's outbound /ws upgrade ---------------------
 
   override async fetch(request: Request): Promise<Response> {
-    return this.#backend.handleFetch(request);
+    return this.backend.handleFetch(request);
   }
 }
 
@@ -173,7 +175,9 @@ async function handleFile(
   path: string,
 ): Promise<Response> {
   const stub = env.ContainerExample.get(env.ContainerExample.idFromName(name));
-  const ws = await stub.getWorkspace();
+  // `wrangler types` doesn't surface the accessor the withWorkspace
+  // mixin installs, so cast at the boundary.
+  const ws = await getWorkspace(stub as unknown as Parameters<typeof getWorkspace>[0]);
 
   if (request.method === "PUT") {
     const body = new Uint8Array(await request.arrayBuffer());
@@ -223,7 +227,7 @@ async function handleExec(request: Request, env: Env, name: string): Promise<Res
   }
 
   const stub = env.ContainerExample.get(env.ContainerExample.idFromName(name));
-  const ws = await stub.getWorkspace();
+  const ws = await getWorkspace(stub as unknown as Parameters<typeof getWorkspace>[0]);
   try {
     const handle = await ws.shell.exec(command, { cwd: body.cwd, encoding: "utf8" });
     const result = await handle.result();
