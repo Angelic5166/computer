@@ -98,7 +98,7 @@ export function createEditTool(options: EditToolOptions): Tool<z.infer<typeof in
     description:
       "Edit a single file using exact text replacement. Every edits[].oldText must match a unique, non-overlapping region of the original file. If two changes touch the same block, merge them into one edit.",
     inputSchema,
-    execute: async (rawInput: unknown) => {
+    execute: async (rawInput: z.infer<typeof inputSchema>) => {
       const { path, edits } = prepareArguments(rawInput);
 
       if (!Array.isArray(edits) || edits.length === 0) {
