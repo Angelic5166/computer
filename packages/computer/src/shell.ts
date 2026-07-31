@@ -290,22 +290,50 @@ function pipeEvents<E extends ExecEncoding>(
   const stderrDec = new TextDecoder("utf-8", { fatal: false });
   let stdoutMeta: { id: string; seq: number } | undefined;
   let stderrMeta: { id: string; seq: number } | undefined;
-  const flushPending = (controller: TransformStreamDefaultController<WorkspaceExecEvent<E>>) => {
+  let lastSeq = 0;
+  const enqueue = (
+    controller: TransformStreamDefaultController<WorkspaceExecEvent<E>>,
+    event: WorkspaceExecEvent<E>,
+  ) => {
+    lastSeq = event.seq;
+    controller.enqueue(event);
+  };
+  const flushPending = (
+    controller: TransformStreamDefaultController<WorkspaceExecEvent<E>>,
+    beforeSeq?: number,
+  ) => {
+    const pending: Array<{
+      id: string;
+      seq: number;
+      name: "stdout" | "stderr";
+      value: Chunk<E>;
+    }> = [];
     const stdout = stdoutDec.decode();
     const stderr = stderrDec.decode();
     if (stdout && stdoutMeta) {
-      controller.enqueue({ ...stdoutMeta, name: "stdout", value: stdout as Chunk<E> });
+      pending.push({ ...stdoutMeta, name: "stdout", value: stdout as Chunk<E> });
     }
     if (stderr && stderrMeta) {
-      controller.enqueue({ ...stderrMeta, name: "stderr", value: stderr as Chunk<E> });
+      pending.push({ ...stderrMeta, name: "stderr", value: stderr as Chunk<E> });
     }
+    pending.sort((a, b) => a.seq - b.seq);
+    const span = beforeSeq !== undefined && beforeSeq > lastSeq ? beforeSeq - lastSeq : 1;
+    for (let index = 0; index < pending.length; index++) {
+      const event = pending[index];
+      enqueue(controller, {
+        ...event,
+        seq: lastSeq + (span * (index + 1)) / (pending.length + 1),
+      });
+    }
+    stdoutMeta = undefined;
+    stderrMeta = undefined;
   };
   return source.pipeThrough(
     new TransformStream<ExecEvent, WorkspaceExecEvent<E>>({
       transform(event, controller) {
         if (event.name === "stdout") {
           stdoutMeta = { id: event.id, seq: event.seq };
-          controller.enqueue({
+          enqueue(controller, {
             id: event.id,
             seq: event.seq,
             name: "stdout",
@@ -313,15 +341,15 @@ function pipeEvents<E extends ExecEncoding>(
           });
         } else if (event.name === "stderr") {
           stderrMeta = { id: event.id, seq: event.seq };
-          controller.enqueue({
+          enqueue(controller, {
             id: event.id,
             seq: event.seq,
             name: "stderr",
             value: stderrDec.decode(event.value, { stream: true }) as Chunk<E>,
           });
         } else {
-          flushPending(controller);
-          controller.enqueue(event as WorkspaceExecEvent<E>);
+          flushPending(controller, event.seq);
+          enqueue(controller, event as WorkspaceExecEvent<E>);
         }
       },
       flush: flushPending,

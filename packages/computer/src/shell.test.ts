@@ -524,6 +524,27 @@ describe("WorkspaceShell.exec — utf8 encoding", () => {
     expect(result.stdout).toBe("🎉");
   });
 
+  it("keeps decoder flush sequence numbers strictly monotonic", async () => {
+    const f = fakeRpc({
+      events: [
+        { id: "_", seq: 1, name: "stdout", value: new Uint8Array([0xf0, 0x9f]) },
+        exit(2, 0),
+      ],
+    });
+    const shell = new WorkspaceShell(f.rpc.shell, makeSync());
+    const handle = await shell.exec("noop", { encoding: "utf8" });
+    const seen: Array<{ seq: number; name: string; value: unknown }> = [];
+    for await (const event of handle) {
+      seen.push({ seq: event.seq, name: event.name, value: event.value });
+    }
+
+    expect(seen).toEqual([
+      { seq: 1, name: "stdout", value: "" },
+      { seq: 1.5, name: "stdout", value: "�" },
+      { seq: 2, name: "exit", value: 0 },
+    ]);
+  });
+
   it("keeps the stdout and stderr decoders independent", async () => {
     // Interleave a partial code point on each stream. If the
     // decoders share state, one stream's tail would land on the

@@ -334,23 +334,47 @@ function transformModuleEvents<E extends ExecEncoding>(
   const stderrDecoder = new TextDecoder();
   let stdoutMeta: { id: string; seq: number } | undefined;
   let stderrMeta: { id: string; seq: number } | undefined;
-  const flushPending = (controller: TransformStreamDefaultController<WorkspaceRuntimeEvent<E>>) => {
+  let lastSeq = 0;
+  const enqueue = (
+    controller: TransformStreamDefaultController<WorkspaceRuntimeEvent<E>>,
+    event: WorkspaceRuntimeEvent<E>,
+  ) => {
+    lastSeq = event.seq;
+    controller.enqueue(event);
+  };
+  const flushPending = (
+    controller: TransformStreamDefaultController<WorkspaceRuntimeEvent<E>>,
+    beforeSeq?: number,
+  ) => {
+    const pending: WorkspaceRuntimeEvent<E>[] = [];
     const stdout = stdoutDecoder.decode();
     const stderr = stderrDecoder.decode();
     if (stdout && stdoutMeta) {
-      controller.enqueue({
+      pending.push({
         ...stdoutMeta,
         name: "stdout",
         value: stdout,
       } as WorkspaceRuntimeEvent<E>);
     }
     if (stderr && stderrMeta) {
-      controller.enqueue({
+      pending.push({
         ...stderrMeta,
         name: "stderr",
         value: stderr,
       } as WorkspaceRuntimeEvent<E>);
     }
+    pending.sort((a, b) => a.seq - b.seq);
+    const span = beforeSeq !== undefined && beforeSeq > lastSeq ? beforeSeq - lastSeq : 1;
+    let index = 0;
+    for (const event of pending) {
+      index += 1;
+      enqueue(controller, {
+        ...event,
+        seq: lastSeq + (span * index) / (pending.length + 1),
+      } as WorkspaceRuntimeEvent<E>);
+    }
+    stdoutMeta = undefined;
+    stderrMeta = undefined;
   };
   return source.pipeThrough(
     new TransformStream<WorkspaceRuntimeEvent, WorkspaceRuntimeEvent<E>>({
@@ -358,15 +382,15 @@ function transformModuleEvents<E extends ExecEncoding>(
         if (event.name === "stdout" || event.name === "stderr") {
           if (event.name === "stdout") stdoutMeta = { id: event.id, seq: event.seq };
           else stderrMeta = { id: event.id, seq: event.seq };
-          controller.enqueue({
+          enqueue(controller, {
             ...event,
             value: (event.name === "stdout" ? stdoutDecoder : stderrDecoder).decode(event.value, {
               stream: true,
             }),
           } as WorkspaceRuntimeEvent<E>);
         } else {
-          if (event.name === "exit") flushPending(controller);
-          controller.enqueue(event as WorkspaceRuntimeEvent<E>);
+          if (event.name === "exit") flushPending(controller, event.seq);
+          enqueue(controller, event as WorkspaceRuntimeEvent<E>);
         }
       },
       flush: flushPending,

@@ -378,6 +378,53 @@ describe("Workspace backend selection", () => {
     expect(replayCalls).toBe(0);
   });
 
+  it("keeps module stream decoder flush sequence numbers strictly monotonic", async () => {
+    const backend: WorkspaceModuleBackend = {
+      protocol: "module",
+      id: "module",
+      type: "test-module",
+      async connect() {
+        return {
+          async exec() {
+            return {
+              id: "module-exec",
+              events: new ReadableStream<import("./runtime/types.js").WorkspaceRuntimeEvent>({
+                start(controller) {
+                  controller.enqueue({
+                    id: "module-exec",
+                    seq: 1,
+                    name: "stdout",
+                    value: new Uint8Array([0xf0, 0x9f]),
+                  });
+                  controller.enqueue({ id: "module-exec", seq: 2, name: "exit", value: 0 });
+                  controller.close();
+                },
+              }),
+            };
+          },
+          getExec: async () => {
+            throw new Error("not used");
+          },
+          killExec: async () => undefined,
+          disposeExec: async () => undefined,
+          close: async () => undefined,
+        };
+      },
+    };
+    const ws = new Workspace({ storage: makeStorage(), backends: [backend] });
+    const execution = await ws.runtime.exec("export default 42", { encoding: "utf8" });
+    const seen: Array<{ seq: number; name: string; value: unknown }> = [];
+    for await (const event of execution) {
+      seen.push({ seq: event.seq, name: event.name, value: event.value });
+    }
+
+    expect(seen).toEqual([
+      { seq: 1, name: "stdout", value: "" },
+      { seq: 1.5, name: "stdout", value: "�" },
+      { seq: 2, name: "exit", value: 0 },
+    ]);
+  });
+
   it("throws on an unknown backend id", async () => {
     const ws = new Workspace({
       storage: makeStorage(),
