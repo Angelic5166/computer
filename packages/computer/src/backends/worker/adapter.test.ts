@@ -96,13 +96,45 @@ describe("WorkspaceFsAdapter — reads", () => {
 
   it("keeps expected PATH misses on the host side", async () => {
     const exists = vi.fn(async () => false);
+    const statOrNull = vi.fn(async () => null);
     const stat = vi.fn(async () => {
       throw Object.assign(new Error("should not cross RPC"), { code: "ENOENT" });
     });
-    const pathAdapter = new WorkspaceFsAdapter({ exists, stat } as unknown as WorkspaceFs);
+    const pathAdapter = new WorkspaceFsAdapter({
+      exists,
+      stat,
+      statOrNull,
+    } as unknown as WorkspaceFs);
 
     await expect(pathAdapter.exists("/usr/bin/cat")).resolves.toBe(false);
+    await expect(pathAdapter.stat("/usr/bin/cat")).rejects.toMatchObject({ code: "ENOENT" });
     expect(exists).toHaveBeenCalledWith("/usr/bin/cat");
+    expect(statOrNull).toHaveBeenCalledWith("/usr/bin/cat");
+    expect(stat).not.toHaveBeenCalled();
+  });
+
+  it("stats existing paths in one host call", async () => {
+    const stat = vi.fn(async () => {
+      throw new Error("stat should not be called by the adapter");
+    });
+    const statOrNull = vi.fn(async () => ({
+      name: "cat",
+      inode: 1,
+      mode: 0o755,
+      mtime: 123,
+      size: 42,
+      isFile: true,
+      isDirectory: false,
+      isSymbolicLink: false,
+    }));
+    const pathAdapter = new WorkspaceFsAdapter({ stat, statOrNull } as unknown as WorkspaceFs);
+
+    await expect(pathAdapter.stat("/usr/bin/cat")).resolves.toMatchObject({
+      isFile: true,
+      mode: 0o755,
+      size: 42,
+    });
+    expect(statOrNull).toHaveBeenCalledTimes(1);
     expect(stat).not.toHaveBeenCalled();
   });
 

@@ -119,15 +119,7 @@ export class WorkspaceFilesystemStub extends RpcTarget {
       this.#ws.observer,
       "workspace.fs.exists",
       { "workspace.fs.path": path },
-      async () => {
-        try {
-          await this.#ws.fs.stat(path);
-          return true;
-        } catch (error) {
-          if ((error as { code?: string }).code === "ENOENT") return false;
-          throw error;
-        }
-      },
+      async () => (await this.statOrNull(path)) !== null,
     );
   }
 
@@ -137,9 +129,41 @@ export class WorkspaceFilesystemStub extends RpcTarget {
     );
   }
 
+  async statOrNull(path: string): Promise<WorkspaceStatResult | null> {
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.statOrNull",
+      { "workspace.fs.path": path },
+      async () => {
+        try {
+          return await this.#ws.fs.stat(path);
+        } catch (error) {
+          if ((error as { code?: string }).code === "ENOENT") return null;
+          throw error;
+        }
+      },
+    );
+  }
+
   lstat(path: string): Promise<WorkspaceStatResult> {
     return withSpan(this.#ws.observer, "workspace.fs.lstat", { "workspace.fs.path": path }, () =>
       this.#ws.fs.lstat(path),
+    );
+  }
+
+  async lstatOrNull(path: string): Promise<WorkspaceStatResult | null> {
+    return withSpan(
+      this.#ws.observer,
+      "workspace.fs.lstatOrNull",
+      { "workspace.fs.path": path },
+      async () => {
+        try {
+          return await this.#ws.fs.lstat(path);
+        } catch (error) {
+          if ((error as { code?: string }).code === "ENOENT") return null;
+          throw error;
+        }
+      },
     );
   }
 

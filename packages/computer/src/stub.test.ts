@@ -220,6 +220,7 @@ describe("WorkspaceStub", () => {
     await withStub(async (ws) => {
       const stub = ws.stub();
       await expect(stub.fs.stat("/missing")).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stub.fs.statOrNull("/missing")).resolves.toBeNull();
     });
   });
 

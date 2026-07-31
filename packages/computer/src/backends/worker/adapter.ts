@@ -37,7 +37,9 @@ export interface WorkspaceFs {
   readFile(path: string, options: ReadFileOptions): Promise<string | ReadableStream<Uint8Array>>;
   exists(path: string): Promise<boolean>;
   stat(path: string): Promise<WorkspaceStatResult>;
+  statOrNull(path: string): Promise<WorkspaceStatResult | null>;
   lstat(path: string): Promise<WorkspaceStatResult>;
+  lstatOrNull(path: string): Promise<WorkspaceStatResult | null>;
   readdir(path: string): Promise<WorkspaceDirentResult[]>;
   find(directory: string, pattern?: string): Promise<WorkspaceFoundEntry[]>;
   ls(prefix: string): Promise<string[]>;
@@ -105,15 +107,17 @@ export class WorkspaceFsAdapter {
   async stat(path: string): Promise<FsStat> {
     const virtual = virtualDevStat(path);
     if (virtual !== undefined) return virtual;
-    if (!(await this.#fs.exists(path))) throw missingPath(path);
-    return mapStat(await this.#fs.stat(path));
+    const stat = await this.#fs.statOrNull(path);
+    if (stat === null) throw missingPath(path);
+    return mapStat(stat);
   }
 
   async lstat(path: string): Promise<FsStat> {
     const virtual = virtualDevStat(path);
     if (virtual !== undefined) return virtual;
-    if (!(await this.#fs.exists(path))) throw missingPath(path);
-    return mapStat(await this.#fs.lstat(path));
+    const stat = await this.#fs.lstatOrNull(path);
+    if (stat === null) throw missingPath(path);
+    return mapStat(stat);
   }
 
   async readdir(path: string): Promise<string[]> {
