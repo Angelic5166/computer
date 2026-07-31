@@ -588,8 +588,9 @@ describe("WorkspaceStub", () => {
         const handle = await stub.runtime.exec("noop");
         const wire = handle.stream();
         await Promise.resolve();
-        // WorkspaceShell's internal exit watcher may prefetch a small number of
-        // events, but the user-facing wire must not drain the whole execution.
+        // The utf8 TransformStream may prefetch a small number of events through
+        // its writable-side high water mark, but the user-facing wire must not
+        // drain the whole execution.
         expect(pulls).toBeLessThan(10);
 
         const reader = wire.getReader();
