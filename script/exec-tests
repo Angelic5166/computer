@@ -231,7 +231,7 @@ try {
   assert(totalBytes > 8000, `expected ~11 KiB of stdout, got ${totalBytes}`);
   console.log(`  PASS  slow reader: ${totalBytes} bytes delivered intact`);
 
-  // 7. Workspace.shell host wrapper (E3). Uses the composite
+  // 7. Workspace.runtime host wrapper (E3). Uses the composite
   // client through the high-level facade: encoding utf8 +
   // ExecHandle.result() in one call.
   // Import the specific files rather than the package barrel.
@@ -256,13 +256,13 @@ try {
   });
   try {
     await ws.ready();
-    const handle = await ws.shell.exec("echo from-workspace && exit 0", {
+    const handle = await ws.runtime.exec("echo from-workspace && exit 0", {
       encoding: "utf8",
     });
     const { exitCode, stdout } = await handle.result();
-    assert(stdout === "from-workspace\n", `Workspace.shell stdout: ${JSON.stringify(stdout)}`);
-    assert(exitCode === 0, `Workspace.shell exitCode: ${exitCode}`);
-    console.log("  PASS  Workspace.shell.exec(...).result() round-trip");
+    assert(stdout === "from-workspace\n", `Workspace.runtime stdout: ${JSON.stringify(stdout)}`);
+    assert(exitCode === 0, `Workspace.runtime exitCode: ${exitCode}`);
+    console.log("  PASS  Workspace.runtime.exec(...).result() round-trip");
   } finally {
     await ws.close();
   }
