@@ -69,8 +69,9 @@ interface RemoteExecHandle {
 // completing; result() also returns its synchronization counts.
 async function rebuildExecHandle<E extends ExecEncoding>(
   remote: RemoteExecHandle,
+  known: { id?: string; backend?: string } = {},
 ): Promise<WorkspaceRuntimeExecHandle<E>> {
-  const [id, backend] = await Promise.all([remote.id, remote.backend]);
+  const [id, backend] = await Promise.all([known.id ?? remote.id, known.backend ?? remote.backend]);
   let claimed: "result" | "stream" | undefined;
   let resultPromise: Promise<WorkspaceRuntimeResult<E>> | undefined;
   let reader: ReadableStreamDefaultReader<WorkspaceRuntimeEvent<E>> | undefined;
@@ -255,8 +256,11 @@ interface UnderlyingRuntime {
   disposeExec(id: string, options?: { backend?: string }): Promise<void>;
 }
 
+type RuntimeHandleMetadata = { id?: string; backend?: string };
+
 type RehydrateRuntimeHandle = <E extends ExecEncoding>(
   handle: unknown,
+  metadata?: RuntimeHandleMetadata,
 ) => WorkspaceRuntimeExecHandle<E> | Promise<WorkspaceRuntimeExecHandle<E>>;
 
 function makeRuntimeClient(
@@ -273,23 +277,36 @@ function makeRuntimeClient(
     if (isTemplateStringsArray(commandOrStrings)) {
       const values = optionsOrValue === undefined ? rest : [optionsOrValue as ShellValue, ...rest];
       const command = sh(commandOrStrings, ...values);
-      return rehydrate<"utf8">(await runtime.exec(command, { encoding: "utf8" }));
+      const id = crypto.randomUUID();
+      return rehydrate<"utf8">(await runtime.exec(command, { id, encoding: "utf8" }), { id });
     }
-    const options = optionsOrValue as RuntimeExecOptions | undefined;
-    const handle =
-      options === undefined
-        ? await runtime.exec(commandOrStrings)
-        : await runtime.exec(commandOrStrings, options as Record<string, unknown>);
-    return options?.encoding === "utf8" ? rehydrate<"utf8">(handle) : rehydrate<undefined>(handle);
+    const options = withExecutionId(optionsOrValue as RuntimeExecOptions | undefined);
+    const handle = await runtime.exec(
+      commandOrStrings,
+      options as unknown as Record<string, unknown>,
+    );
+    const metadata = { id: options.id, backend: options.backend };
+    return options.encoding === "utf8"
+      ? rehydrate<"utf8">(handle, metadata)
+      : rehydrate<undefined>(handle, metadata);
   }
   const getExec = async (id: string, options?: RuntimeGetOptions) => {
     const handle = await runtime.getExec(id, options as Record<string, unknown> | undefined);
-    return options?.encoding === "utf8" ? rehydrate<"utf8">(handle) : rehydrate<undefined>(handle);
+    const metadata = { id, backend: options?.backend };
+    return options?.encoding === "utf8"
+      ? rehydrate<"utf8">(handle, metadata)
+      : rehydrate<undefined>(handle, metadata);
   };
   const killExec = (id: string, options?: RuntimeKillOptions) => runtime.killExec(id, options);
   const disposeExec = (id: string, options?: { backend?: string }) =>
     runtime.disposeExec(id, options);
   return { exec, getExec, killExec, disposeExec } as WorkspaceRuntimeClient;
+}
+
+function withExecutionId(
+  options: RuntimeExecOptions | undefined,
+): RuntimeExecOptions & { id: string } {
+  return { ...options, id: options?.id ?? crypto.randomUUID() };
 }
 
 // The canonical client surface. `runtime.exec` is the adapted member;
@@ -311,7 +328,7 @@ export interface WorkspaceClient extends Partial<ThinkWorkspaceCompatibility> {
 function makeClient(
   // biome-ignore lint/suspicious/noExplicitAny: underlying surface differs per path
   surface: any,
-  rehydrate: (handle: unknown) => unknown,
+  rehydrate: (handle: unknown, metadata?: RuntimeHandleMetadata) => unknown,
   dispose: () => void,
   useThink: boolean,
 ): WorkspaceClient {
@@ -372,7 +389,7 @@ export async function getWorkspace(handle: WorkspaceHandle): Promise<WorkspaceCl
   try {
     return makeClient(
       stub,
-      (h) => rebuildExecHandle(h as RemoteExecHandle),
+      (h, metadata) => rebuildExecHandle(h as RemoteExecHandle, metadata),
       () => {
         (stub as { [Symbol.dispose]?: () => void })[Symbol.dispose]?.();
       },

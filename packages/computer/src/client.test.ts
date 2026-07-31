@@ -1,9 +1,9 @@
-// Unit tests for getWorkspace and the client's shell.exec forms.
+// Unit tests for getWorkspace and the client's runtime.exec forms.
 //
 // Two dispatch paths: a local host carrying the symbol-stashed
 // Workspace (getWorkspace(this)), and a remote stub exposing
 // __getWorkspaceStub (getWorkspace(env.MyDO.get(id))). Both must yield
-// the same client surface and the same shell.exec behavior. These
+// the same client surface and the same runtime.exec behavior. These
 // tests use fakes for both paths so the dispatch and the local
 // escaping are pinned without standing up workerd.
 
@@ -19,27 +19,25 @@ interface ExecCall {
   options: Record<string, unknown> | undefined;
 }
 
-// A fake shell that records exec calls. Stands in for both
+// A fake runtime that records exec calls. Stands in for both
 // Workspace.runtime (local) and the runtime stub (remote) — the client
 // only needs `exec(command, options?)`.
-function fakeShell(promisedProperties = false) {
+function fakeRuntime(promisedProperties = false) {
   const calls: ExecCall[] = [];
   let disposedHandles = 0;
   // A minimal handle satisfying both the local identity rehydrate
   // (which passes it through) and the remote rebuild (which calls
   // stream()/result()/kill()). stream() emits one JSONL exit frame so
   // the rebuilt handle can be iterated.
-  const makeHandle = () => ({
-    id: promisedProperties ? Promise.resolve("x") : "x",
-    backend: promisedProperties ? Promise.resolve("test") : "test",
+  const makeHandle = (id = "x", backend = "test") => ({
+    id: promisedProperties ? Promise.resolve(id) : id,
+    backend: promisedProperties ? Promise.resolve(backend) : backend,
     result: () => Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }),
     stream: () => {
       const stream = new ReadableStream<Uint8Array>({
         start(c) {
           c.enqueue(
-            new TextEncoder().encode(
-              `${JSON.stringify({ id: "x", seq: 0, name: "exit", value: 0 })}\n`,
-            ),
+            new TextEncoder().encode(`${JSON.stringify({ id, seq: 0, name: "exit", value: 0 })}\n`),
           );
           c.close();
         },
@@ -57,11 +55,13 @@ function fakeShell(promisedProperties = false) {
     runtime: {
       exec(command: string, options?: Record<string, unknown>) {
         calls.push({ command, options });
-        return Promise.resolve(makeHandle());
+        return Promise.resolve(
+          makeHandle(options?.id as string | undefined, options?.backend as string | undefined),
+        );
       },
       getExec(id: string, options?: Record<string, unknown>) {
         calls.push({ command: `get:${id}`, options });
-        return Promise.resolve(makeHandle());
+        return Promise.resolve(makeHandle(id, options?.backend as string | undefined));
       },
       killExec(id: string, options?: Record<string, unknown>) {
         calls.push({ command: `kill:${id}`, options });
@@ -83,7 +83,7 @@ function fakeRemote(): {
   disposed: () => boolean;
   disposedHandles: () => number;
 } {
-  const { runtime, calls, disposedHandles } = fakeShell(true);
+  const { runtime, calls, disposedHandles } = fakeRuntime(true);
   let disposed = false;
   const stub = {
     fs: { marker: "fs" },
@@ -128,7 +128,7 @@ function fakeBrokenRemote(): {
 // can assert on exec without a backend.
 function fakeLocal(): { host: { [WORKSPACE]: Workspace }; calls: ExecCall[] } {
   const ws = new Workspace({ storage: new SQLiteTestStorage() });
-  const { runtime, calls } = fakeShell();
+  const { runtime, calls } = fakeRuntime();
   Object.defineProperty(ws, "runtime", { get: () => runtime });
   return { calls, host: { [WORKSPACE]: ws } };
 }
@@ -149,7 +149,7 @@ describe("getWorkspace — remote dispatch", () => {
     const handle = await ws.runtime.exec("echo ok");
     const events = [];
     for await (const event of handle) events.push(event);
-    expect(events).toEqual([{ id: "x", seq: 0, name: "exit", value: 0 }]);
+    expect(events).toEqual([{ id: expect.any(String), seq: 0, name: "exit", value: 0 }]);
   });
 
   it("exposes the complete runtime lifecycle and preserves handle ids", async () => {
@@ -159,7 +159,7 @@ describe("getWorkspace — remote dispatch", () => {
       id: string;
       backend: string;
     };
-    expect(handle.id).toBe("x");
+    expect(handle.id).toBe("run-1");
     expect(handle.backend).toBe("test");
     await ws.runtime.killExec("run-1", { signal: "SIGINT" });
     await ws.runtime.disposeExec("run-1", { backend: "container-shell" });
@@ -223,8 +223,8 @@ describe("getWorkspace — local dispatch", () => {
       useThink: true,
     });
     const host = { [WORKSPACE]: workspace };
-    const { shell } = fakeShell();
-    Object.defineProperty(workspace, "shell", { get: () => shell });
+    const { runtime } = fakeRuntime();
+    Object.defineProperty(workspace, "runtime", { get: () => runtime });
 
     const client = (await getWorkspace(host)) as WorkspaceClient & ThinkWorkspaceCompatibility;
 
@@ -232,7 +232,7 @@ describe("getWorkspace — local dispatch", () => {
   });
 });
 
-describe("client shell.exec — tagged template form", () => {
+describe("client runtime.exec — tagged template form", () => {
   it("escapes interpolated values before they reach the shell", async () => {
     const { host, calls } = fakeRemote();
     const ws = await getWorkspace(host);
@@ -244,7 +244,7 @@ describe("client shell.exec — tagged template form", () => {
     const { host, calls } = fakeRemote();
     const ws = await getWorkspace(host);
     await ws.runtime.exec`ls`;
-    expect(calls[0].options).toEqual({ encoding: "utf8" });
+    expect(calls[0].options).toEqual({ id: expect.any(String), encoding: "utf8" });
   });
 
   it("quotes each element of an interpolated array", async () => {
@@ -255,12 +255,15 @@ describe("client shell.exec — tagged template form", () => {
   });
 });
 
-describe("client shell.exec — plain string form", () => {
+describe("client runtime.exec — plain string form", () => {
   it("forwards a bare command with no options", async () => {
     const { host, calls } = fakeRemote();
     const ws = await getWorkspace(host);
     await ws.runtime.exec("npm test");
-    expect(calls[0]).toEqual({ command: "npm test", options: undefined });
+    expect(calls[0]).toEqual({
+      command: "npm test",
+      options: { id: expect.any(String) },
+    });
   });
 
   it("forwards options unchanged", async () => {
@@ -269,7 +272,7 @@ describe("client shell.exec — plain string form", () => {
     await ws.runtime.exec("npm test", { cwd: "/workspace", backend: "sandbox" });
     expect(calls[0]).toEqual({
       command: "npm test",
-      options: { cwd: "/workspace", backend: "sandbox" },
+      options: { cwd: "/workspace", backend: "sandbox", id: expect.any(String) },
     });
   });
 
@@ -281,7 +284,7 @@ describe("client shell.exec — plain string form", () => {
   });
 });
 
-describe("client shell.exec — remote handle rebuild", () => {
+describe("client runtime.exec — remote handle rebuild", () => {
   it("rebuilds a host-shaped handle: result() returns the run-and-wait result", async () => {
     const { host } = fakeRemote();
     const ws = await getWorkspace(host);
