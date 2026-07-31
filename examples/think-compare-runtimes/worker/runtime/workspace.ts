@@ -122,6 +122,10 @@ function commandSubstitutions(command: string): string[] {
   let escaped = false;
   for (let index = 0; index < command.length; index++) {
     const char = command[index];
+    if (singleQuoted) {
+      if (char === "'") singleQuoted = false;
+      continue;
+    }
     if (escaped) {
       escaped = false;
       continue;
@@ -131,14 +135,13 @@ function commandSubstitutions(command: string): string[] {
       continue;
     }
     if (char === "'" && !doubleQuoted) {
-      singleQuoted = !singleQuoted;
+      singleQuoted = true;
       continue;
     }
     if (char === '"' && !singleQuoted) {
       doubleQuoted = !doubleQuoted;
       continue;
     }
-    if (singleQuoted) continue;
     if (char === "`") {
       const end = command.indexOf("`", index + 1);
       if (end !== -1) {
@@ -154,6 +157,10 @@ function commandSubstitutions(command: string): string[] {
       let innerEscaped = false;
       for (; end < command.length && depth > 0; end++) {
         const inner = command[end];
+        if (quote === "'") {
+          if (inner === "'") quote = null;
+          continue;
+        }
         if (innerEscaped) {
           innerEscaped = false;
           continue;

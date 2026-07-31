@@ -143,6 +143,7 @@ describe("createWorkspaceFixtureRuntime", () => {
     'echo "$(./scripts/check-docs.mjs)"',
     `echo "$(printf ')'; npm test)"`,
     'echo "$(echo "$(node --version)")"',
+    "echo '\\' $(npm test)",
   ])(
     "exec routes runtime and package commands to the Workspace container backend: %s",
     async (command) => {
