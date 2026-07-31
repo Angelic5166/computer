@@ -373,6 +373,7 @@ export class WorkspaceRuntimeStub extends RpcTarget {
     source: string,
     options: WorkspaceRuntimeExecOptions<"utf8" | undefined> = {},
   ): Promise<WorkspaceRuntimeExecHandleStub<"utf8" | undefined>> {
+    await this.#ws.ready(options.backend);
     const handle = await (
       this.#ws.runtime.exec as unknown as (
         source: string,
@@ -395,6 +396,7 @@ export class WorkspaceRuntimeStub extends RpcTarget {
     id: string,
     options: WorkspaceRuntimeGetOptions<"utf8" | undefined> = {},
   ): Promise<WorkspaceRuntimeExecHandleStub<"utf8" | undefined>> {
+    await this.#ws.ready(options.backend);
     const handle = await (
       this.#ws.runtime.getExec as unknown as (
         id: string,

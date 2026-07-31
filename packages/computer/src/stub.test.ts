@@ -16,6 +16,7 @@ import { SQLiteTestStorage } from "@cloudflare/dofs/testing";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import type { BackendHandle, WorkspaceBackend } from "./backend.js";
+import type { EagerMount, MountWriteAPI } from "./mounts/types.js";
 import type { WorkspaceRuntimeExecHandle, WorkspaceRuntimeResult } from "./runtime/types.js";
 import { decodeRuntimeEvents } from "./runtime/wire.js";
 import {
@@ -92,6 +93,15 @@ function backend(rpc?: Partial<import("@cloudflare/computer-rpc").WorkspaceRPC>)
       return { rpc: composite(sync, shell), close: async () => {} };
     },
   };
+}
+
+function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
 }
 
 function snapshotOf(names: string[]): Record<string, number> {
@@ -211,6 +221,52 @@ describe("WorkspaceStub", () => {
       const stub = ws.stub();
       await expect(stub.fs.stat("/missing")).rejects.toMatchObject({ code: "ENOENT" });
     });
+  });
+
+  it("runtime.exec indexes mounts before dispatching the command", async () => {
+    let materialized = false;
+    const mount: EagerMount = {
+      kind: "fake",
+      mode: "read-only",
+      strategy: "eager",
+      async materialize(api: MountWriteAPI) {
+        materialized = true;
+        await api.writeFile(
+          "/workspace/data/a.txt",
+          streamOf(new TextEncoder().encode("mounted")),
+          0o644,
+        );
+      },
+    };
+    const shellRpc: import("@cloudflare/computer-rpc").ShellRPC = {
+      async exec() {
+        expect(materialized).toBe(true);
+        return {
+          id: "e-1",
+          events: new ReadableStream({
+            start(c) {
+              c.enqueue({ id: "e-1", seq: 1, name: "exit", value: 0 });
+              c.close();
+            },
+          }),
+        };
+      },
+      getExec: () => Promise.reject(new Error("not used")),
+      killExec: () => Promise.reject(new Error("not used")),
+      disposeExec: () => Promise.reject(new Error("not used")),
+    };
+    const ws = new Workspace({
+      storage: new SQLiteTestStorage(),
+      backends: [backend({ shell: shellRpc })],
+      mounts: { "/workspace/data": mount },
+    });
+    try {
+      const handle = await ws.stub().runtime.exec("cat /workspace/data/a.txt");
+      await expect(handle.result()).resolves.toMatchObject({ exitCode: 0 });
+      await expect(ws.fs.readFile("/workspace/data/a.txt", "utf8")).resolves.toBe("mounted");
+    } finally {
+      await ws.close();
+    }
   });
 
   it("shell.exec auto-reconnects after the backend signals closed", async () => {
