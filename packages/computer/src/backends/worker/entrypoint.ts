@@ -73,11 +73,6 @@ export interface HostWorkspaceStub extends GitCommandHost, AssetsCommandHost {
 
 const DEFAULT_CWD = "/workspace";
 const MAX_OUTPUT_BYTES = 1024 * 1024;
-const defenseDebug = console.debug.bind(console);
-console.debug = (...args: unknown[]) => {
-  if (String(args[0]).startsWith("[DefenseInDepthBox] Could not register import() hooks:")) return;
-  defenseDebug(...args);
-};
 
 // Wire event shape. Matches @cloudflare/computer-rpc's ExecEvent
 // but with stdout/stderr values as utf8 strings (the host-side
