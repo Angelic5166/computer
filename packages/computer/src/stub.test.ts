@@ -269,6 +269,34 @@ describe("WorkspaceStub", () => {
     }
   });
 
+  it("runtime.exec rejects when a backend ignores the requested id", async () => {
+    const shellRpc: import("@cloudflare/computer-rpc").ShellRPC = {
+      async exec() {
+        return {
+          id: "other-id",
+          events: new ReadableStream({
+            start(c) {
+              c.enqueue({ id: "other-id", seq: 1, name: "exit", value: 0 });
+              c.close();
+            },
+          }),
+        };
+      },
+      getExec: () => Promise.reject(new Error("not used")),
+      killExec: () => Promise.reject(new Error("not used")),
+      disposeExec: () => Promise.reject(new Error("not used")),
+    };
+
+    await withStub(
+      async (ws) => {
+        await expect(ws.stub().runtime.exec("noop", { id: "requested-id" })).rejects.toThrow(
+          "backend ran exec as other-id, not the requested id requested-id",
+        );
+      },
+      { backend: backend({ shell: shellRpc }) },
+    );
+  });
+
   it("shell.exec auto-reconnects after the backend signals closed", async () => {
     // When the underlying transport drops mid-session, the
     // Workspace clears its cached BackendHandle for that backend

@@ -380,6 +380,9 @@ export class WorkspaceRuntimeStub extends RpcTarget {
         options: WorkspaceRuntimeExecOptions<"utf8" | undefined>,
       ) => Promise<WorkspaceRuntimeExecHandle<"utf8" | undefined>>
     )(source, options);
+    if (options.id !== undefined && handle.id !== options.id) {
+      throw new Error(`backend ran exec as ${handle.id}, not the requested id ${options.id}`);
+    }
     return new WorkspaceRuntimeExecHandleStub(handle);
   }
 
