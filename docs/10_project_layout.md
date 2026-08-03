@@ -14,18 +14,16 @@ The workspace ships as a monorepo. Each published package lives under
 ```
 
 ```
-workspace/
+computer/
 ├── packages/
-│   ├── workspace/         # @cloudflare/computer — DO-side facade, backends, proxy
-│   ├── vfs/               # @cloudflare/dofs — SQLite-backed VFS + sync
-│   ├── rpc/               # @cloudflare/computer-rpc — capnweb wire interface
-│   ├── computerd/               # @cloudflare/computerd — in-container daemon (binary)
-│   ├── fs-tools/          # (planned) AI SDK file tools + FileStore
-│   └── git-tools/         # (planned) AI SDK git tools
-├── examples/
-│   └── container/     # Reference container image for the computerd daemon
-├── docs/                  # This documentation set
-└── package.json           # Workspace root (workspaces: packages/*, examples/*)
+│   ├── computer/                       # @cloudflare/computer — DO-side facade, backends, proxy
+│   ├── dofs/                           # @cloudflare/dofs — SQLite-backed VFS + sync
+│   ├── rpc/                            # @cloudflare/computer-rpc — capnweb wire interface
+│   ├── computerd/                      # @cloudflare/computerd — in-container daemon (binary)
+│   └── computer-computerd-linux-x64/   # @cloudflare/computer-computerd-linux-x64 — prebuilt binary
+├── examples/                           # Runnable Worker examples (see below)
+├── docs/                               # This documentation set
+└── package.json                        # Workspace root (workspaces: packages/*, examples/*)
 ```
 
 ### Folder rename history
@@ -74,7 +72,7 @@ packages/computer/
 └── package.json
 ```
 
-The package builds ESM and declarations with Rolldown. Public entrypoints include the root facade, Git, assets, artifacts, Container and Worker shell backends, and Cloudflare observability. The injected service is the separate `computerd` package, and shared wire types live in `@cloudflare/computer-rpc`.
+The package builds ESM and declarations with Rolldown. Public entrypoints include the root facade, tools, Git, assets, artifacts, the Container, Worker shell, and Worker JavaScript backends, and Cloudflare observability. The injected service is the separate `computerd` package, and shared wire types live in `@cloudflare/computer-rpc`.
 
 ## `packages/dofs/` — `@cloudflare/dofs`
 
@@ -175,12 +173,13 @@ Build pipeline: `scripts/build.mjs` emits `dist/cli/computerd.cjs`;
 produces the Node SEA single-file binary at
 `artifacts/computerd/computerd-{linux,macos}-x64`.
 
-## `packages/fs-tools/` — **(planned)**
+## Tools
 
-AI SDK tools (`read`, `write`, `edit`, `grep`, `exec`) plus the
-`FileStore` abstraction the file-shaped ones drive. See
-[09. Tool Interface (Agents)](./09_tool_interface.md). Not
-implemented yet.
+AI SDK tools (`read`, `write`, `edit`, `ls`, optional `exec`, and
+optional `publish`) ship from the `@cloudflare/computer/tools` subpath
+rather than a separate package, under
+[`packages/computer/src/tools/`](../packages/computer/src/tools/). See
+[09. Tool Interface (Agents)](./09_tool_interface.md).
 
 ## Git
 
@@ -198,11 +197,14 @@ Runnable examples live at the repo root, not inside any package:
 
 ```
 examples/
-├── container/        # Reference container image for computerd
-├── worker-shell/     # WorkerShellBackend example
-├── worker-javascript/ # WorkerJavaScriptBackend example
-├── code/             # workspace.runtime with Worker and Container shells
-└── think/            # @cloudflare/think integration
+├── container/                # computerd inside a Cloudflare Container
+├── worker-shell/             # WorkerShellBackend (just-bash) example
+├── worker-javascript/        # WorkerJavaScriptBackend example
+├── think/                    # @cloudflare/think chat integration
+├── think-compare-runtimes/   # container vs worker runtime comparison UI
+├── tutorial/                 # step-by-step pandoc PDF agent
+├── artifacts/                # publish a workspace to Cloudflare Artifacts
+└── assets/                   # Workers AI image → shareable R2 link
 ```
 
 The root `package.json` includes `examples/*` in its workspaces glob

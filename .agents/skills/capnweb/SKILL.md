@@ -28,7 +28,7 @@ JSON over a long-lived WebSocket, with an HTTP batch alternative.
   — typed stubs over a WebSocket carrier. The Durable Object uses a
   deferred transport so the stub can be created before the upgrade
   completes.
-- [`packages/rpc/src/driver.ts`](../../../packages/rpc/src/driver.ts)
+- [`packages/rpc/src/sync-driver.ts`](../../../packages/rpc/src/sync-driver.ts)
   — `pullOnce`, `pushOnce`, `tick`. These wrap streaming methods and
   handle disposal internally.
 - [`packages/rpc/src/debug.ts`](../../../packages/rpc/src/debug.ts)

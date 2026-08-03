@@ -7,7 +7,7 @@
 > Suitable for experiments, exploration and prototypes. It is NOT suitable
 > for production use at this time.
 >
-> The specification under [`docs/`](docs/) is forward-looking — read it for
+> The specification in this directory is forward-looking — read it for
 > intent, not as description of the code today.
 
 The `@cloudflare/computer` package provides an out of the box virtual filesystem for use in any Durable Object — it's persistent and backed by SQLite. It's primarily designed for agents that need small, portable filesystems and tools to work with.
@@ -57,25 +57,35 @@ Wire types shared with the in-container service live in the sibling package `@cl
 
 ### Sandbox container image
 
-The container needs the `computerd` daemon alongside a FUSE runtime. The recommended pattern mirrors [`examples/container/Dockerfile`](../examples/container/Dockerfile): build `computerd` as a single Node SEA binary (`npm run build:bin --workspace @cloudflare/computerd`), stage it into the image's build context, and copy it into a thin Debian base:
+The container needs the `computerd` daemon alongside a FUSE runtime. The
+simplest pattern, used by [`examples/container/Dockerfile`](../examples/container/Dockerfile),
+copies the prebuilt binary out of the public GHCR image and into a thin
+Debian base:
 
 ```dockerfile
-FROM --platform=linux/amd64 debian:stable-slim
+FROM ghcr.io/cloudflare/computer-computerd-linux-x64:0.1.0-alpha.1 AS computerd
+
+FROM debian:stable-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       fuse3 libfuse2t64 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-COPY build/computerd-linux-x64 /usr/local/bin/computerd
-RUN chmod +x /usr/local/bin/computerd
+COPY --from=computerd /usr/local/bin/computerd /usr/local/bin/computerd
 
 ENV PORT=8080
 ENV MOUNT_POINT=/workspace
+ENV FUSE_MOUNT=auto
 EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/computerd"]
 ```
+
+To build the binary from source instead, run `npm run build:bin
+--workspace @cloudflare/computerd`, which emits
+`artifacts/computerd/computerd-linux-x64`, then `COPY` that into the
+image.
 
 `computerd`'s own default port is `45678`; the Cloudflare container backend pins the in-image listener to `8080`, which is what `examples/container/` uses. See [07. Injected Service](./07_injected_service.md) for the env vars (`PORT`, `MOUNT_POINT`, `FUSE_MOUNT`, `UPSTREAM_URL`, `EXEC_LOG_MAX_BYTES`) and the reverse-dial boot sequence.
 
@@ -232,6 +242,7 @@ above, then dive into the area you're working on.
 | [16. Execution runtime architecture](./16_code_execution.md) | One runtime entry point over command and module backends. |
 | [17. Isolate JavaScript runtime](./17_isolate_javascript.md) | ECMAScript modules, durable imports, configured libraries, durable `node:fs/promises`, trusted `ws:git` / `ws:artifacts`, and managed lifecycle. |
 | [18. Runtime migration](./18_runtime_migration.md) | Breaking preview-API mappings from public shell and script-execution surfaces to `workspace.runtime`. |
+| [19. Performance](./19_performance.md) | Filesystem benchmarks: `fs-bench` numbers, an `npm install` comparison, and how to reproduce them. |
 
 ## High-level API
 

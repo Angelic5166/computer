@@ -43,6 +43,9 @@ with package-specific status and usage notes:
   HTTP/WebSocket RPC server that runs inside the sandbox container.
 - [`packages/computer`](packages/computer/) — the top-level
   `@cloudflare/computer` package consumed by Durable Objects.
+- [`packages/computer-computerd-linux-x64`](packages/computer-computerd-linux-x64/) —
+  the prebuilt `computerd` binary for linux-x64, distributed for use in
+  container images.
 
 [`docs/`](docs/) holds the design specification. It is forward-looking
 and has diverged from `main` in places — treat it as intent, not as a

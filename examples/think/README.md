@@ -85,7 +85,7 @@ does not configure the assets publisher, so `publish` is not offered.
 The system prompt tells the model to prefer `read`/`ls` over
 `exec cat`/`exec ls`, `write`/`edit` over shell text munging, and the
 fast `shell` backend before falling through to `container`. See
-[`docs/05_shell_interface.md`](../../docs/05_shell_interface.md),
+[`docs/05_runtime_interface.md`](../../docs/05_runtime_interface.md),
 [`docs/13_git_interface.md`](../../docs/13_git_interface.md), and
 [`examples/container`](../container).
 

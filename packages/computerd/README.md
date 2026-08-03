@@ -7,7 +7,7 @@
 > Suitable for experiments, exploration and prototypes. It is NOT suitable
 > for production use at this time.
 >
-> The specification under [`docs/`](docs/) is forward-looking — read it for
+> The specification under [`docs/`](../../docs/README.md) is forward-looking — read it for
 > intent, not as description of the code today.
 
 Computer daemon CLI and FUSE mount package.
