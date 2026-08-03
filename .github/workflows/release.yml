@@ -17,16 +17,16 @@
 #      hop). Stable releases also move each registry's `:latest`
 #      tag; prereleases only push the version-specific tag.
 #
-# The computerd binary is shipped two ways:
-#   - inside the @cloudflare/computer npm tarball at dist/bin/
-#     computerd-linux-x64, so consumers installing the package get it for
-#     free; and
-#   - as a single-layer container image, mirrored to both
-#     ghcr.io/cloudflare/computer-computerd-linux-x64 and
-#     registry.cloudflare.com/library/computer-computerd-linux-x64. The
-#     example Dockerfiles pin the GHCR coordinate (anonymous pulls,
-#     no Cloudflare-account dependency); the CF copy is kept for
-#     consumers that prefer to stay on the in-platform registry.
+# The computerd binary ships as a single-layer container image,
+# mirrored to both ghcr.io/cloudflare/computer-computerd-linux-x64
+# and registry.cloudflare.com/library/computer-computerd-linux-x64.
+# The example Dockerfiles pin the GHCR coordinate (anonymous pulls,
+# no Cloudflare-account dependency); the CF copy is kept for
+# consumers that prefer to stay on the in-platform registry. It is
+# deliberately NOT bundled inside the @cloudflare/computer npm
+# tarball — nothing in the package resolves it at runtime, and
+# every consumer copies it out of the image via `COPY --from`, so
+# bundling only bloated the tarball by ~120 MB.
 #
 # npm packages use trusted publishing (OIDC); no NPM_TOKEN is
 # needed, only the workflow's `id-token: write` permission plus a
@@ -116,18 +116,6 @@ jobs:
 
       - name: Build computerd binary
         run: npm run build:bin --workspace @cloudflare/computerd
-
-      # Short-term bundling: ship the linux-x64 computerd binary inside
-      # @cloudflare/computer under dist/bin/ — not registered as a
-      # "bin" entry, so npm install won't try to symlink it on
-      # non-linux hosts. Docker workflows reach in and copy it out
-      # explicitly. Replace with a proper platform-package install
-      # once we have more than one target.
-      - name: Stage binary into @cloudflare/computer
-        run: |
-          mkdir -p packages/computer/dist/bin
-          cp artifacts/computerd/computerd-linux-x64 packages/computer/dist/bin/computerd-linux-x64
-          chmod +x packages/computer/dist/bin/computerd-linux-x64
 
       - name: Sync versions
         run: node script/set-versions.mjs "${RELEASE_TAG}"

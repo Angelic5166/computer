@@ -10,6 +10,9 @@
   },
   "private": false,
   "type": "module",
+  "publishConfig": {
+    "tag": "unreleased"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
