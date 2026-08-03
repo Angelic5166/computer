@@ -1,168 +1,293 @@
 # `@cloudflare/computer`
 
+A persistent, SQLite-backed virtual filesystem for Durable Objects,
+with pluggable command and code execution. Built for agents that need a
+small, portable working directory and the tools to read, write, and run
+things in it.
+
 > [!IMPORTANT]
-> **PREVIEW ONLY** This package is provided as a preview for feedback only.
-> APIs are unstable and the design is subject to change.
->
-> Suitable for experiments, exploration and prototypes. It is NOT suitable
-> for production use at this time.
->
-> The specification under [`docs/`](docs/) is forward-looking — read it for
-> intent, not as description of the code today.
+> **PREVIEW ONLY.** This package is provided as a preview for feedback
+> only. APIs are unstable and the design is subject to change. Suitable
+> for experiments, exploration, and prototypes. It is NOT suitable for
+> production use at this time.
 
-Durable Object-side facade for Cloudflare Computer. Pairs a local
-SQLite-backed VFS (via `@cloudflare/dofs`) with pluggable execution
-backends selected through `workspace.runtime.exec()`.
+## What you get
 
-Three backends ship today on tree-shakeable subpaths:
+- **A filesystem in your Durable Object.** `workspace.fs` looks like
+  `node:fs/promises` — `readFile`, `writeFile`, `mkdir`, `readdir`,
+  `rm`, `grep` — and is durable across DO restarts, backed by the DO's
+  own SQLite storage.
+- **One execution surface, several backends.**
+  `workspace.runtime.exec()` runs a shell command or an ECMAScript
+  module. Pick a full Linux container, a fast in-Worker shell, or an
+  isolated JavaScript runtime, all against the same files.
+- **Batteries for agents.** Ready-made [AI SDK](https://github.com/vercel/ai)
+  tools (`read`, `write`, `edit`, `ls`, `exec`), a git client, R2-backed
+  read-only mounts, and helpers for publishing files.
 
-- [`@cloudflare/computer/backends/container`](./src/backends/container/) —
-  runs the shell inside a Cloudflare Container against a `computerd`
-  daemon. Full Linux userland, real binaries, real network. The
-  container owns its own SQLite-backed VFS and the package syncs
-  the two stores across a capnweb WebSocket.
-- [`@cloudflare/computer/backends/worker-shell`](./src/backends/worker-shell/) —
-  runs the shell as [just-bash](https://github.com/vercel-labs/just-bash)
-  inside a Dynamic Worker minted through `env.LOADER`. Every
-  filesystem operation forwards back to the same Durable Object;
-  no second store, no sync round trip. See
-  [`docs/12_worker_backend.md`](../../docs/12_worker_backend.md) and
-  `examples/worker-shell/`.
-- [`@cloudflare/computer/backends/worker-javascript`](./src/backends/worker-javascript/) —
-  executes ECMAScript modules in fresh Dynamic Workers with structured
-  input/results, durable relative imports, configured libraries, durable
-  `node:fs/promises`, and trusted `ws:git` / `ws:artifacts` modules. See
-  [`docs/17_isolate_javascript.md`](../../docs/17_isolate_javascript.md).
+The Workspace can also run with no execution backend at all, giving you
+just the filesystem.
 
-The worker-JavaScript backend runs after `runtime.exec()` returns. Pass
-`waitUntil: ctx.waitUntil.bind(ctx)` to `Workspace` so completion remains
-attached to the Durable Object event. The backend refuses to connect without
-this lifecycle hook. It admits one execution at a time by default and bounds
-completed execution retention by time and count.
+### Limits
 
-A backend can declare `sync: "none"` on the handle it returns to
-opt out of the push/pull bracket entirely — the worker backend
-does this because its shell shares the host store directly. The
-bracket still runs around `runtime.exec` so the surface stays
-uniform; the counts are just always zero.
+- ~10 GB per workspace (it shares storage with the DO).
+- The container-side filesystem is held in memory. Aim for agent-scale
+  workspaces, not full monorepos.
+- Container access goes through FUSE, so heavy I/O (large `node_modules`
+  installs, big tarball extractions) is slower than a native disk. See
+  [`docs/19_performance.md`](../../docs/19_performance.md).
 
-## Public surface
+## Installation
 
-- `Workspace` — the host-side facade. Owns the local store, the
-  backend handle, and the push/pull bracket.
-- `WorkspaceStub` — what `workspace.stub()` returns, designed to
-  cross the Workers-RPC boundary into another Worker or DO.
-- `workspace.runtime` / `WorkspaceRuntimeStub` — the single execution
-  surface: `exec`, `getExec`, `killExec`, and `disposeExec`. The selected
-  backend defines the source language. JavaScript results may include a
-  structured `value`; command backends return stdout/stderr and an exit code.
-- `workspace.git` — an opt-in typed git client backed by
-  `isomorphic-git` against the local SQLite VFS. Pass
-  `createGitClient()` from `@cloudflare/computer/git` as
-  `WorkspaceOptions.git` to enable both the TypeScript API
-  (`workspace.git.clone({ url })`) and the argv-driven entry point
-  (`workspace.git.cli({ argv })`). The git subpath bundles
-  `isomorphic-git` lazily and replaces its `pako` dependency with
-  the Workers `node:zlib` implementation, so the default package
-  graph stays free of git. The worker backend's shell exposes the
-  same dispatcher through a built-in `git` custom command when git
-  is configured. See
-  [`docs/13_git_interface.md`](../../docs/13_git_interface.md).
-- `createAssets` (from `@cloudflare/computer/assets`) — `share` a
-  workspace file to an R2 bucket and get back a presigned URL.
-  Binds the workspace and bucket once, like `workspace.git`. When
-  attached through `WorkspaceOptions.assets`, the worker backend's
-  shell also exposes `assets publish <path> [<expiry>]`. See
-  [`docs/14_assets_interface.md`](../../docs/14_assets_interface.md).
-- `createArtifact(binding, sessionId)` — a session-scoped facade
-  over the [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/)
-  Workers binding, on the `@cloudflare/computer/artifacts`
-  subpath. Every repository name is implicitly prefixed with the
-  session id, so one namespace hosts many isolated sessions. Like
-  git, it surfaces both a typed API and an argv CLI
-  (`artifacts.cli({ argv })`); when `Workspace` is configured with
-  an Artifacts binding, the worker backend exposes the same CLI as
-  an `artifacts` custom command. See
-  [`docs/15_artifacts_interface.md`](../../docs/15_artifacts_interface.md).
+```sh
+npm install @cloudflare/computer
+```
 
-## Typical DO-side usage
+Your Worker needs the `nodejs_compat` compatibility flag. The
+worker-shell and worker-javascript backends additionally need the
+`experimental` flag and a Worker Loader binding. Each backend has its
+own binding requirements — see [Choosing a backend](#choosing-a-backend).
 
-Container backend:
+Optional peer dependencies, installed only if you use the matching
+feature: `ai` and `zod` (for `@cloudflare/computer/tools`),
+`@platformatic/vfs` (for the Node-side VFS provider).
+
+## Quick start
+
+The smallest useful thing is a filesystem with no execution backend. Add
+`withWorkspace` to a Durable Object and you have durable files:
 
 ```ts
-import { Workspace, WorkspaceProxy } from "@cloudflare/computer";
-import { CloudflareContainerBackend, withWorkspaceContainer }
-  from "@cloudflare/computer/backends/container";
+import { withWorkspace, getWorkspace } from "@cloudflare/computer";
 import { DurableObject } from "cloudflare:workers";
 
-export { WorkspaceProxy };
+export class Agent extends withWorkspace(
+  class extends DurableObject<Env> {},
+  (self) => ({ storage: self.ctx.storage }),
+) {}
 
-export class ContainerExample extends withWorkspaceContainer(class extends DurableObject<Env> {}) {
-  #workspace = new Workspace({
-    storage: this.ctx.storage,
-    backends: [
-      new CloudflareContainerBackend({
-        container: () => this,
-        workspace: { binding: "ContainerExample", id: this.ctx.id.toString() },
-      }),
-    ],
-  });
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const id = env.Agent.idFromName("user-123");
+    using ws = await getWorkspace(env.Agent.get(id));
 
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspace.ready();
-    return this.#workspace.stub();
-  }
+    await ws.fs.writeFile("/notes.md", "- [ ] ship it\n");
+    const notes = await ws.fs.readFile("/notes.md", "utf8");
 
-  override fetch(req: Request) { return this.#workspace; /* see example */ }
+    return new Response(notes);
+  },
+} satisfies ExportedHandler<Env>;
+```
+
+`wrangler.jsonc`:
+
+```jsonc
+{
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "Agent", "class_name": "Agent" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Agent"] }
+  ]
 }
 ```
 
-Worker backend:
+To run commands against those files, add an execution backend. The
+worker-shell backend needs no container and no Docker, so it's the
+quickest way to get `exec` working:
 
 ```ts
-import { Workspace, WorkspaceServiceProxy } from "@cloudflare/computer";
+import { withWorkspace, getWorkspace } from "@cloudflare/computer";
 import { WorkerShellBackend } from "@cloudflare/computer/backends/worker-shell";
 import { DurableObject } from "cloudflare:workers";
 
-export { WorkspaceServiceProxy };
-
-export class WorkerExample extends DurableObject<Env> {
-  #workspace = new Workspace({
-    storage: this.ctx.storage,
+export class Agent extends withWorkspace(
+  class extends DurableObject<Env> {},
+  (self) => ({
+    storage: self.ctx.storage,
     backends: [
       new WorkerShellBackend({
-        loader: this.env.LOADER,
-        workspace: { binding: "WorkerExample", id: this.ctx.id.toString() },
-        ctx: this.ctx,
+        loader: self.env.LOADER,
+        workspace: { binding: "Agent", id: self.ctx.id.toString() },
+        ctx: self.ctx,
       }),
     ],
-  });
+  }),
+) {}
+```
 
-  async getWorkspace(): Promise<WorkspaceStub> {
-    await this.#workspace.ready();
-    return this.#workspace.stub();
-  }
+Add the loader binding and the `experimental` flag to `wrangler.jsonc`:
+
+```jsonc
+{
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "worker_loaders": [{ "binding": "LOADER" }]
 }
 ```
 
-Filesystem only — no execution backend:
+Now `exec` runs against the same files your `fs` calls wrote:
 
 ```ts
-const ws = new Workspace({ storage: ctx.storage });
-await ws.ready();
-await ws.fs.writeFile("/notes.md", "hello");
-const body = await ws.fs.readFile("/notes.md", "utf8");
-// ws.runtime throws — there's no backend wired up.
+using ws = await getWorkspace(env.Agent.get(id));
+await ws.fs.writeFile("/hello.txt", "world");
+using run = await ws.runtime.exec("cat /hello.txt");
+const { stdout, exitCode } = await run.result();
 ```
 
-Pass `useThink: true` when assigning a workspace to `Think.workspace`.
-That adds Think's compatibility methods directly to the local instance
-and to clients returned by `getWorkspace()`, while keeping `workspace.fs`
-and `workspace.runtime` as the primary surfaces.
+For a full, runnable version of this see
+[`examples/worker-shell`](../../examples/worker-shell).
 
-Git, also without a backend:
+## The filesystem
+
+`workspace.fs` is async, uses absolute paths, and is durable across DO
+restarts. Strings default to UTF-8; pass a `Uint8Array` or a
+`ReadableStream` for binary content.
 
 ```ts
+// Write a string, bytes, or a stream straight to disk.
+await ws.fs.writeFile("/notes/todo.md", "- [ ] ship it\n");
+await ws.fs.writeFile("/data/blob.bin", new Uint8Array([1, 2, 3]));
+await ws.fs.writeFile("/uploads/big.csv", request.body!);
+
+// Read back as a string or as a stream.
+const todo = await ws.fs.readFile("/notes/todo.md", "utf8");
+const stream = await ws.fs.readFile("/uploads/big.csv");
+return new Response(stream);
+
+// Directories.
+await ws.fs.mkdir("/notes/daily", { recursive: true });
+for (const entry of await ws.fs.readdir("/notes")) {
+  console.log(entry.isDirectory ? `d ${entry.name}` : `f ${entry.name}`);
+}
+
+// Remove and search.
+await ws.fs.rm("/notes/daily", { recursive: true });
+const hits = await ws.fs.grep("TODO", "/", { ignoreCase: true });
+```
+
+See [`docs/04_filesystem_interface.md`](../../docs/04_filesystem_interface.md)
+for the full surface.
+
+### Read-only mounts
+
+Pre-fill part of the tree from an R2 bucket. Files under the mount point
+are read-only; writes reject with `EROFS`.
+
+```ts
+import { R2Bucket } from "@cloudflare/computer";
+
+new Workspace({
+  storage: ctx.storage,
+  mounts: { "/workspace/r2": R2Bucket(env.Bucket) },
+});
+```
+
+## Running commands and code
+
+`workspace.runtime.exec(source, options)` is the single execution entry
+point. What `source` means depends on the backend: a shell command for
+the container and worker-shell backends, an ECMAScript module for the
+worker-javascript backend.
+
+```ts
+using run = await ws.runtime.exec("ls -la /workspace", { encoding: "utf8" });
+const { stdout, stderr, exitCode } = await run.result();
+```
+
+The handle is also a `ReadableStream` of live events, so you can forward
+output as it happens — for example, as Server-Sent Events:
+
+```ts
+async fetch(request: Request) {
+  const run = await ws.runtime.exec("npm test", { encoding: "utf8" });
+
+  const sse = run.pipeThrough(
+    new TransformStream({
+      transform(event, controller) {
+        const frame = `event: ${event.name}\ndata: ${JSON.stringify(event.value)}\n\n`;
+        controller.enqueue(new TextEncoder().encode(frame));
+      },
+    }),
+  );
+
+  return new Response(sse, {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+  });
+}
+```
+
+Alongside `exec`, the runtime exposes `getExec`, `killExec`, and
+`disposeExec`. See
+[`docs/05_runtime_interface.md`](../../docs/05_runtime_interface.md).
+
+### Choosing a backend
+
+| Backend | Import | Runs | Needs |
+| --- | --- | --- | --- |
+| **Container** | `@cloudflare/computer/backends/container` | Shell commands in full Linux userland (real binaries, `npm`, `node`, network) | A Cloudflare Container running `computerd` |
+| **Worker shell** | `@cloudflare/computer/backends/worker-shell` | Shell commands via [just-bash](https://github.com/vercel-labs/just-bash) in a Dynamic Worker | A Worker Loader binding; `experimental` flag |
+| **Worker JavaScript** | `@cloudflare/computer/backends/worker-javascript` | ECMAScript modules in a fresh Dynamic Worker | A Worker Loader binding; `experimental` flag |
+
+- **Container** cold-starts more slowly but gives you a real Linux
+  environment. The container owns its own SQLite-backed VFS and this
+  package syncs the two stores across a capnweb WebSocket. See
+  [`docs/07_injected_service.md`](../../docs/07_injected_service.md) for
+  the container image, and [`examples/container`](../../examples/container).
+- **Worker shell** is fast and needs no container. Every filesystem
+  operation forwards back to the same Durable Object, so there's no
+  second store and no sync round trip. See
+  [`docs/12_worker_backend.md`](../../docs/12_worker_backend.md) and
+  [`examples/worker-shell`](../../examples/worker-shell).
+- **Worker JavaScript** evaluates a module with structured
+  input/results, durable relative imports, configured libraries,
+  Workspace-backed `node:fs/promises`, and trusted `ws:git` /
+  `ws:artifacts` modules. It runs after `runtime.exec()` returns, so
+  pass `waitUntil: ctx.waitUntil.bind(ctx)` to `Workspace`; the backend
+  refuses to connect without it. See
+  [`docs/17_isolate_javascript.md`](../../docs/17_isolate_javascript.md)
+  and [`examples/worker-javascript`](../../examples/worker-javascript).
+
+You can register several backends on one Workspace and route each call
+to a named one — see [Multiple backends](#multiple-backends).
+
+## Tools for agents
+
+`@cloudflare/computer/tools` ships AI SDK tools that wrap the Workspace
+surfaces, ready to hand to `generateText`, `streamText`, or an agent
+framework's `getTools()`. The default set is `read`, `write`, `edit`,
+and `ls`; `exec` and `publish` are added when you configure them.
+
+```ts
+import { createAITools } from "@cloudflare/computer/tools";
+
+const tools = createAITools({
+  workspace,
+  read: { maxBytes: 32 * 1024, maxLines: 800 },
+  shell: {
+    defaultBackend: "shell",
+    backends: {
+      shell: { description: "Fast Worker shell with built-in text commands." },
+      container: { description: "Full Linux userland in a Cloudflare Container." },
+    },
+  },
+});
+```
+
+The model reads each backend's `description` when deciding where a
+command should run, so write them in plain language. See
+[`docs/09_tool_interface.md`](../../docs/09_tool_interface.md).
+
+## Git
+
+`workspace.git` is an opt-in typed git client backed by
+[`isomorphic-git`](https://github.com/isomorphic-git/isomorphic-git),
+operating directly on the local SQLite VFS — no backend or shell
+required. Enable it by passing `createGitClient()` from
+`@cloudflare/computer/git`:
+
+```ts
+import { Workspace } from "@cloudflare/computer";
 import { createGitClient } from "@cloudflare/computer/git";
 
 const ws = new Workspace({
@@ -170,220 +295,205 @@ const ws = new Workspace({
   git: createGitClient(),
   defaultGitIdentity: { name: "Agent", email: "agent@example.test" },
 });
+
 await ws.git.clone({ url: "https://github.com/example/repo.git" });
 await ws.fs.writeFile("/notes.md", "hello");
 await ws.git.add({ paths: ["notes.md"] });
 await ws.git.commit({ message: "add notes" });
-const log = await ws.git.log({ depth: 1 });
 ```
 
-Every `workspace.git` operation reads and writes through the
-local store; no backend or shell is required. See the doc
-above for the full method surface, error hierarchy, and CLI
-shape.
+The git subpath bundles `isomorphic-git` lazily and swaps its `pako`
+dependency for the Workers `node:zlib` implementation, so the default
+package graph stays free of git. There's also an argv entry point
+(`workspace.git.cli({ argv })`), and when git is configured the
+worker-shell backend exposes a built-in `git` command. See
+[`docs/13_git_interface.md`](../../docs/13_git_interface.md).
 
-## Artifacts
+## Sharing files
 
-`createArtifact(binding, sessionId)` wraps the Cloudflare
-Artifacts Workers binding in a session-scoped client. Names go
-in and out local; the session id is added as a prefix on the
-way to the namespace and stripped on the way back.
+Two ways to get a file out of the workspace and into the world:
+
+- **Assets** (`@cloudflare/computer/assets`): `createAssets(...).share`
+  uploads a workspace file to R2 and returns a presigned URL. Attach it
+  through `WorkspaceOptions.assets` to expose an in-shell
+  `assets publish <path> [<expiry>]` command. See
+  [`docs/14_assets_interface.md`](../../docs/14_assets_interface.md).
+- **Artifacts** (`@cloudflare/computer/artifacts`):
+  `createArtifact(binding, sessionId)` is a session-scoped facade over
+  the [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/)
+  binding. Every repository name is implicitly prefixed with the session
+  id, so one namespace hosts many isolated sessions.
 
 ```ts
 import { createArtifact } from "@cloudflare/computer/artifacts";
 
 const artifacts = createArtifact(env.ARTIFACTS, agentId);
-
-const repo = await artifacts.create("build-cache", {
-  description: "CI artifacts for this agent",
-});
-// repo.name -> "build-cache"; stored as `${agentId}__build-cache`.
-
+const repo = await artifacts.create("build-cache", { description: "CI artifacts" });
 const token = await artifacts.createToken("build-cache", "read", 3600);
-// token.plaintext is a git token — a secret, shown once.
-
-const mine = await artifacts.list();
-// Only this session's repos, names unscoped.
+const mine = await artifacts.list(); // only this session's repos
 ```
 
-The binding (`Artifacts`) and its result shapes are the global
-types from a Workers project's `@cloudflare/workers-types` setup;
-the facade adds session scoping on top rather than redeclaring the
-wire protocol. Pass the binding to `Workspace` as
-`artifacts: { binding: env.ARTIFACTS }` to expose the same surface as
-an in-shell `artifacts` command. See
+Artifacts also offers an argv CLI (`artifacts.cli({ argv })`), and when
+`Workspace` is configured with an Artifacts binding the worker-shell
+backend exposes an `artifacts` command. See
 [`docs/15_artifacts_interface.md`](../../docs/15_artifacts_interface.md).
 
-## Multiple backends per workspace
+## Crossing the Worker → DO boundary
 
-A Workspace can carry more than one backend. Each backend
-registers under a stable selector `id` (defaulting to
-`"worker-shell"`, `"container-shell"`, or `"worker-javascript"`; this is intentionally separate from the diagnostic `type`).
-`runtime.exec` picks the default (the first backend in the list)
-unless the caller names one through `WorkspaceRuntimeExecOptions.backend`. Per-backend
-sync cursors live in dofs's `_vfs_watermark` table keyed by
-the same id; a push or pull against one backend never disturbs
-the other's cursors.
-
-A backend also declares whether it is `callable`. A callable
-backend accepts a structured `input` value on `runtime.exec` and
-returns a structured `value` on the result; the
-`worker-javascript` backend sets `callable: true` because it runs
-a module that takes an argument and produces a return value. This
-is independent of the backend kind — a shell backend that coerced
-JSON into argv and stdin and parsed stdout back into a value could
-declare itself callable too. When a caller passes `input` to a
-backend that is not callable, the runtime rejects the call with a
-clear error rather than silently dropping the value, so a custom
-backend must set `callable: true` before it can receive `input`.
-
-```ts
-const workspace = new Workspace({
-  storage: ctx.storage,
-  backends: [
-    new WorkerShellBackend({
-      id: "shell",
-      loader: env.LOADER,
-      workspace: { binding: "AgentDO", id: ctx.id.toString() },
-      ctx,
-    }),
-    new CloudflareContainerBackend({
-      id: "sandbox",
-      container: () => this,
-      workspace: { binding: "AgentDO", id: ctx.id.toString() },
-    }),
-  ],
-});
-
-// Default: the first backend in the list runs the command.
-const grep = await ws.runtime.exec("grep -r TODO /workspace");
-
-// Explicit: route a heavy build to the container.
-const build = await ws.runtime.exec("npm test", { backend: "sandbox" });
-```
-
-Backends connect lazily — the first `exec` (or `push` /
-`pull` / `ready(id)`) for an id dials it. `ready({ all: true })`
-pre-warms every configured backend in parallel; useful from an
-agent's `onStart`. `Workspace.push(id?)` and
-`Workspace.pull(id?)` target a single backend, defaulting to
-the first one.
-
-A workspace with two backends that both write into
-`/workspace` has no global ordering between them; see
-[`docs/05_runtime_interface.md`](../../docs/05_runtime_interface.md)
-for the caveat.
-
-## Durable pending-sync retries
-
-A command can finish after changing backend files while its post-command pull fails. The command result exposes `sync: { status: "pending", error, ... }`. Configure a `SyncRetryScheduler` on `Workspace` to persist one coalesced retry intent per backend, then call `workspace.retryPendingSync(backend)` from the owning Durable Object's alarm or another durable scheduler. Retries share the same per-backend mutation FIFO as `push`, `pull`, and command brackets, use bounded exponential backoff, clear their intent after success, and return `"exhausted"` after the configured maximum. The library intentionally does not own the host Durable Object's alarm.
-
-See `SyncRetryScheduler`, `SyncRetryIntent`, and `SyncRetryOptions` in the root package exports for the persistence contract.
-
-## Worker-side consumption
+The Durable Object owns the Workspace; a Worker reaches it through a
+stub. `withWorkspace` installs the plumbing, and `getWorkspace(stub)`
+returns a client:
 
 ```ts
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const id = env.ContainerExample.idFromName("user-123");
-    using ws = await env.ContainerExample.get(id).getWorkspace();
+    const id = env.Agent.idFromName("user-123");
+    using ws = await getWorkspace(env.Agent.get(id));
 
     await ws.fs.writeFile("/notes.md", "hello");
-    using handle = await ws.runtime.exec("ls /workspace");
-    const { exitCode, stdout } = await handle.result();
+    using run = await ws.runtime.exec("ls /workspace");
+    const { exitCode, stdout } = await run.result();
 
     return new Response(stdout, { status: exitCode === 0 ? 200 : 500 });
   },
 } satisfies ExportedHandler<Env>;
 ```
 
-## Observability
+### Dispose your stubs
 
-The package emits one span per documented operation through an optional
-observer hook. Pass an observer to the `Workspace` constructor:
+The one gotcha worth internalizing: the RPC layer does not
+garbage-collect remote stubs. On long-lived sessions undisposed stubs
+accumulate on the peer until the session ends. The rules are short:
+
+- `using` the value from `getWorkspace(...)`.
+- `using` the handle from `ws.runtime.exec(...)`.
+- Don't worry about `ws.fs`, `ws.runtime`, or `ws.git` — they ride with
+  the parent.
+- Pure-value returns (`readFile` as a string, `stat`, `readdir`,
+  `git.cli({...})`) carry no stubs; nothing to dispose.
+
+Short-lived single-shot Workers tear the session down with the request,
+so this matters most on long-lived isolates that keep grabbing fresh
+stubs or on busy `exec` workloads. The full contract is in
+[`docs/11_lifecycle.md`](../../docs/11_lifecycle.md#stub-disposal-contract).
+
+To hunt leaks, set `CAPNWEB_TRACK_STUBS=1` and read `stubSnapshot()`
+from `@cloudflare/computer-rpc/debug`, or hit `GET /__computerd/stubs`
+on a computerd instance.
+
+## Package entrypoints
+
+| Entrypoint | Purpose |
+| --- | --- |
+| `@cloudflare/computer` | The `Workspace` facade, `workspace.runtime`, stub types, the R2 mount, and proxy classes. |
+| `@cloudflare/computer/backends/container` | `CloudflareContainerBackend` and `withWorkspaceContainer`. Pulls in the computerd / capnweb sync plumbing. |
+| `@cloudflare/computer/backends/worker-shell` | `WorkerShellBackend` and the bundled just-bash runtime. |
+| `@cloudflare/computer/backends/worker-javascript` | `WorkerJavaScriptBackend`, configured libraries, durable imports, `node:fs/promises`, and trusted `ws:git` / `ws:artifacts`. |
+| `@cloudflare/computer/tools` | AI SDK tools for agents: `read`, `write`, `edit`, `ls`, optional `exec` and `publish`. |
+| `@cloudflare/computer/git` | Opt-in `isomorphic-git` glue for checkouts inside the workspace. |
+| `@cloudflare/computer/assets` | `createAssets` — share a workspace file to R2 as a presigned URL. |
+| `@cloudflare/computer/artifacts` | `createArtifact` and its CLI, a session-scoped facade over the Cloudflare Artifacts binding. |
+| `@cloudflare/computer/observe/cloudflare` | Cloudflare-runtime adapter for the observability hook. |
+
+A consumer that only uses the container backend never imports the worker
+subpaths, so unused backend payloads tree-shake away. Wire types shared
+with the in-container service live in the sibling package
+`@cloudflare/computer-rpc`.
+
+## Advanced
+
+### Multiple backends
+
+A Workspace can carry more than one backend, each registered under a
+stable selector `id` (defaulting to `"worker-shell"`,
+`"container-shell"`, or `"worker-javascript"`). `runtime.exec` uses the
+first backend unless the caller names one:
 
 ```ts
-import { Workspace, type WorkspaceObserver } from "@cloudflare/computer";
-
-const observer: WorkspaceObserver = {
-  async span(name, attributes, run) {
-    // Wrap `run` however your tracing backend wants. The Cloudflare
-    // runtime, OpenTelemetry, and a plain console.log adapter all fit
-    // the same shape.
-    return run({ setAttribute: () => {} });
-  },
-};
-
 const ws = new Workspace({
-  storage: this.ctx.storage,
-  backends: [...],
-  observer,
+  storage: ctx.storage,
+  backends: [
+    new WorkerShellBackend({ id: "shell", loader: env.LOADER, /* ... */ }),
+    new CloudflareContainerBackend({ id: "sandbox", container: () => this, /* ... */ }),
+  ],
 });
+
+const grep = await ws.runtime.exec("grep -r TODO /workspace");  // default: "shell"
+const build = await ws.runtime.exec("npm test", { backend: "sandbox" });
 ```
 
-The observer's `span(name, attributes, run)` wraps each operation. It
-starts a span, runs the callback, and ends the span when the callback
-returns or its promise settles. Errors thrown by the work record
-`error.name` and `error.message` and propagate.
+Backends connect lazily — the first `exec`, `push`, `pull`, or
+`ready(id)` for an id dials it. `ready({ all: true })` pre-warms every
+backend, which is handy from an agent's `onStart`. Per-backend sync
+cursors are independent, so activity on one never disturbs the other.
 
-The span names the package emits today:
+A backend that accepts a structured `input` and returns a structured
+`value` declares `callable: true` (the worker-javascript backend does).
+Passing `input` to a non-callable backend is a clear error rather than a
+silent drop.
 
-- `workspace.connect` — one per `connect()` attempt against a single
-  backend. Tagged with `workspace.backend.id`.
-- `workspace.sync.push` / `workspace.sync.pull` — one per sync call.
-  Tagged with the entry counts (`workspace.sync.pushed`,
-  `workspace.sync.applied`, `workspace.sync.skipped`).
-- `workspace.runtime.exec.spawn` — command-backend dispatch. Command
-  synchronization emits separate `workspace.sync.push` and
-  `workspace.sync.pull` spans. Module-runtime instrumentation currently
-  records backend connection and capability filesystem operations; a
-  unified parent execution span is planned.
-- `workspace.fs.<op>` — one per filesystem call routed through the
-  stub (`readFile`, `writeFile`, `stat`, `readdir`, `find`, `ls`,
-  `grep`, `mkdir`, `rm`). Tagged with `workspace.fs.path` and, where
-  meaningful, `workspace.fs.entries` or `workspace.fs.matches`.
+### Constructing without the mixin
 
-Attribute values are restricted to `boolean | number | string` so the
-same observer shape works against the Cloudflare runtime's built-in
-`ctx.tracing.enterSpan(...)` API, OpenTelemetry, or a recording test
-observer. Adapter packages for the Cloudflare runtime and for
-OpenTelemetry are forthcoming.
+`withWorkspace` is the shortcut. You can also construct a `Workspace`
+directly and expose it through a stub yourself:
 
-The default is a no-op observer with no allocation or async overhead
-beyond what the callback itself does, so the package has no
-observability cost when callers do not opt in.
+```ts
+const ws = new Workspace({ storage: ctx.storage, backends: [/* ... */] });
+await ws.ready();
+const stub = ws.stub();  // crosses the Workers-RPC boundary
+```
 
-## Stub disposal
+When assigning a workspace to a Think agent's `workspace`, pass
+`useThink: true` so Think's compatibility methods are added alongside
+`workspace.fs` and `workspace.runtime`.
 
-capnweb does not garbage-collect remote stubs. On the long-lived
-sessions this package depends on (Worker ↔ DO over Workers RPC,
-DO ↔ computerd over capnweb), undisposed stubs accumulate on the peer
-side until the session ends. The worker backend uses Workers RPC
-over an isolate boundary rather than capnweb, but the disposal
-discipline is the same.
+### Durable pending-sync retries
 
-The minimum a caller needs to know:
+A command can change backend files and then have its post-command pull
+fail; the result exposes `sync: { status: "pending", ... }`. Configure a
+`SyncRetryScheduler` on `Workspace` to persist one coalesced retry per
+backend, then call `workspace.retryPendingSync(backend)` from your DO's
+alarm. Retries use bounded exponential backoff and return `"exhausted"`
+after the configured maximum. The library does not own your DO's alarm.
+See `SyncRetryScheduler`, `SyncRetryIntent`, and `SyncRetryOptions` in
+the package exports.
 
-- `using` the value returned from `env.COMPUTERD.get(id).getWorkspace()`.
-- `using` the handle returned from `ws.runtime.exec(...)`.
-- Don't worry about `ws.fs`, `ws.runtime`, or `ws.git` — those are
-  property accessors that ride with the parent.
-- Pure-value returns (`readFile` as a string, `stat`, `readdir`,
-  `git.cli({...})`, etc.) carry no stubs; nothing to dispose.
+### Observability
 
-Short-lived single-shot Workers (one `getWorkspace()`, a few calls,
-return a response) tear the session down with the request, so the
-discipline matters most on long-lived isolates that keep grabbing
-fresh `WorkspaceStub`s or on busy `exec` workloads inside a single
-request.
+Pass an `observer` to the `Workspace` constructor to receive one span
+per documented operation (`workspace.connect`, `workspace.sync.push`,
+`workspace.sync.pull`, `workspace.runtime.exec.spawn`,
+`workspace.fs.<op>`). The `span(name, attributes, run)` shape fits the
+Cloudflare runtime's `ctx.tracing`, OpenTelemetry, or a test recorder;
+attribute values are restricted to `boolean | number | string`. The
+default is a zero-cost no-op, so there's no overhead unless you opt in.
+An adapter for the Cloudflare runtime lives at
+`@cloudflare/computer/observe/cloudflare`.
 
-The full contract — including the boundary between the driver code
-and direct streaming callers, and how it interacts with hibernation
-and reconnect — is in [`docs/11_lifecycle.md`](../../docs/11_lifecycle.md#stub-disposal-contract).
+## Examples
 
-Leak discovery: set `CAPNWEB_TRACK_STUBS=1` and read the snapshot
-via `stubSnapshot()` from `@cloudflare/computer-rpc/debug`, or
-hit `GET /__computerd/stubs` on a computerd instance. The soak scripts at
-[`script/computerd-stub-soak.mjs`](../../script/computerd-stub-soak.mjs) and
-[`tests/stub-soak.test.ts`](./tests/stub-soak.test.ts) exercise both
-boundaries.
+- [`examples/worker-shell`](../../examples/worker-shell) — the
+  worker-shell backend behind a `write` / `read` / `exec` HTTP surface.
+  No container.
+- [`examples/worker-javascript`](../../examples/worker-javascript) — the
+  same shape, running ECMAScript modules instead of shell commands.
+- [`examples/container`](../../examples/container) — the container
+  backend running `computerd`.
+- [`examples/think`](../../examples/think) — a chat agent that uses the
+  workspace as its working directory.
+- [`examples/tutorial`](../../examples/tutorial) — a step-by-step build:
+  write a markdown card on the host, render it to PDF with `pandoc` in
+  the container.
+
+## Documentation
+
+The design specification lives under [`docs/`](../../docs/README.md).
+Start with [01. VFS](../../docs/01_vfs.md),
+[04. Filesystem Interface](../../docs/04_filesystem_interface.md), and
+[05. Runtime Interface](../../docs/05_runtime_interface.md). It is
+forward-looking — read it for intent, not as a description of the code
+today.
+
+## License
+
+MIT. See [`LICENSE`](../../LICENSE).
